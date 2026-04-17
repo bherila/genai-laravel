@@ -1,6 +1,6 @@
 # genai-laravel
 
-Provider-agnostic GenAI client for Laravel. Supports Google Gemini and AWS Bedrock (Claude) through a single interface.
+Provider-agnostic GenAI client for Laravel. Supports Google Gemini, AWS Bedrock (Claude), and Anthropic direct API through a single interface.
 
 ## Installation
 
@@ -19,7 +19,7 @@ php artisan vendor:publish --tag=genai-config
 Set your provider in `.env`:
 
 ```env
-# Choose: gemini or bedrock
+# Choose: gemini, bedrock, or anthropic
 GENAI_PROVIDER=gemini
 
 # Gemini
@@ -32,6 +32,11 @@ BEDROCK_SECRET_KEY=your-aws-secret-access-key
 BEDROCK_SESSION_TOKEN=   # optional, for temporary credentials
 BEDROCK_REGION=us-east-1
 BEDROCK_MODEL=us.anthropic.claude-haiku-4-20250514-v1:0
+
+# Anthropic
+ANTHROPIC_API_KEY=your-key
+ANTHROPIC_MODEL=claude-sonnet-4-6
+ANTHROPIC_MAX_TOKENS=8192
 ```
 
 ## Usage
@@ -75,6 +80,18 @@ try {
 } finally {
     $ai->deleteFile($fileRef);
 }
+```
+
+### Sending a file (Anthropic — inline bytes)
+
+```php
+$bytes = base64_encode(file_get_contents($path));
+$response = $ai->converseWithInlineFile(
+    fileBytes: $bytes,
+    mimeType: 'application/pdf',
+    prompt: 'Extract key financial figures.',
+    system: [['text' => 'You are a financial analyst.']],
+);
 ```
 
 ### Sending a file (Bedrock — inline bytes)
@@ -123,24 +140,38 @@ $toolConfig = [
 ];
 ```
 
+```php
+// Anthropic toolConfig
+$toolConfig = [
+    'tools' => [
+        Tdb::bedrockToolSpec('extract_data', 'Extract fields', [
+            'type' => 'object',
+            'properties' => ['amount' => Tdb::jsonNumber(), 'date' => Tdb::jsonString()],
+        ]),
+    ],
+    'tool_choice' => ['type' => 'any'],
+];
+```
+
 ### Per-provider clients
 
 ```php
 use Bherila\GenAiLaravel\Clients\GenAiClientFactory;
 
-$gemini  = GenAiClientFactory::make('gemini');
-$bedrock = GenAiClientFactory::make('bedrock');
+$gemini    = GenAiClientFactory::make('gemini');
+$bedrock   = GenAiClientFactory::make('bedrock');
+$anthropic = GenAiClientFactory::make('anthropic');
 ```
 
 ## Providers
 
-| Feature | Gemini | Bedrock |
-|---|---|---|
-| File upload API | ✅ `uploadFile()` | ❌ inline only |
-| Inline file bytes | ✅ | ✅ |
-| Tool/function calling | ✅ | ✅ |
-| File size limit | 20 MB (practical) | 4.5 MB |
-| System prompts | ✅ `systemInstruction` | ✅ `system` blocks |
+| Feature | Gemini | Bedrock | Anthropic |
+|---|---|---|---|
+| File upload API | ✅ `uploadFile()` | ❌ inline only | ❌ inline only |
+| Inline file bytes | ✅ | ✅ | ✅ |
+| Tool/function calling | ✅ | ✅ | ✅ |
+| File size limit | 20 MB (practical) | 4.5 MB | 4.5 MB |
+| System prompts | ✅ `systemInstruction` | ✅ `system` blocks | ✅ `system` blocks |
 
 ## License
 
