@@ -3,8 +3,13 @@
 namespace Bherila\GenAiLaravel\Tests\Unit;
 
 use Bherila\GenAiLaravel\Clients\AnthropicClient;
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\Schema;
+use Bherila\GenAiLaravel\ToolChoice;
+use Bherila\GenAiLaravel\ToolConfig;
+use Bherila\GenAiLaravel\ToolDefinition;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Orchestra\Testbench\TestCase;
@@ -69,7 +74,7 @@ class AnthropicClientTest extends TestCase
     {
         Http::fake(['*' => Http::response($this->fakeTextResponse())]);
 
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
 
         Http::assertSent(function (Request $req) {
             return $req->header('x-api-key')[0] === 'test-key'
@@ -81,7 +86,7 @@ class AnthropicClientTest extends TestCase
     {
         Http::fake(['*' => Http::response($this->fakeTextResponse())]);
 
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
 
         Http::assertSent(fn (Request $req) => str_ends_with($req->url(), '/v1/messages'));
     }
@@ -90,23 +95,22 @@ class AnthropicClientTest extends TestCase
     {
         Http::fake(['*' => Http::response($this->fakeTextResponse())]);
 
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
 
         Http::assertSent(function (Request $req) {
             $body = $req->data();
 
-            return $body['model'] === 'claude-sonnet-4-6'
-                && isset($body['max_tokens']);
+            return $body['model'] === 'claude-sonnet-4-6' && isset($body['max_tokens']);
         });
     }
 
-    public function test_converse_converts_system_blocks_to_anthropic_format(): void
+    public function test_converse_sends_system_as_content_block_array(): void
     {
         Http::fake(['*' => Http::response($this->fakeTextResponse())]);
 
         $this->makeClient()->converse(
-            system: [['text' => 'You are helpful.']],
-            messages: [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]],
+            system: 'You are helpful.',
+            messages: [['role' => 'user', 'content' => [ContentBlock::text('hi')]]],
         );
 
         Http::assertSent(function (Request $req) {
@@ -117,11 +121,11 @@ class AnthropicClientTest extends TestCase
         });
     }
 
-    public function test_converse_omits_system_key_when_empty(): void
+    public function test_converse_omits_system_when_empty(): void
     {
         Http::fake(['*' => Http::response($this->fakeTextResponse())]);
 
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
 
         Http::assertSent(fn (Request $req) => ! array_key_exists('system', $req->data()));
     }
@@ -130,12 +134,12 @@ class AnthropicClientTest extends TestCase
     {
         Http::fake(['*' => Http::response($this->fakeTextResponse())]);
 
-        $toolConfig = [
-            'tools' => [['name' => 'my_tool', 'description' => 'test', 'input_schema' => ['type' => 'object']]],
-            'tool_choice' => ['type' => 'auto'],
-        ];
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('my_tool', 'test', Schema::object([]))],
+            choice: ToolChoice::auto(),
+        );
 
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]], $toolConfig);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]], $toolConfig);
 
         Http::assertSent(function (Request $req) {
             $body = $req->data();
@@ -148,7 +152,7 @@ class AnthropicClientTest extends TestCase
     {
         Http::fake(['*' => Http::response($this->fakeTextResponse())]);
 
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]], null);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]], null);
 
         Http::assertSent(function (Request $req) {
             $body = $req->data();
@@ -157,12 +161,34 @@ class AnthropicClientTest extends TestCase
         });
     }
 
+    public function test_tool_config_converts_to_anthropic_format(): void
+    {
+        Http::fake(['*' => Http::response($this->fakeTextResponse())]);
+
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('extract', 'Extract data', Schema::object([
+                'amount' => Schema::number('Dollar amount'),
+            ], required: ['amount']))],
+            choice: ToolChoice::any(),
+        );
+
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]], $toolConfig);
+
+        Http::assertSent(function (Request $req) {
+            $body = $req->data();
+
+            return ($body['tools'][0]['name'] ?? '') === 'extract'
+                && isset($body['tools'][0]['input_schema'])
+                && ($body['tool_choice']['type'] ?? '') === 'any';
+        });
+    }
+
     public function test_converse_throws_rate_limit_exception_on_429(): void
     {
         Http::fake(['*' => Http::response(['error' => ['type' => 'rate_limit_error']], 429)]);
 
         $this->expectException(GenAiRateLimitException::class);
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
     }
 
     public function test_converse_throws_fatal_exception_on_400(): void
@@ -170,7 +196,7 @@ class AnthropicClientTest extends TestCase
         Http::fake(['*' => Http::response(['error' => ['type' => 'invalid_request_error']], 400)]);
 
         $this->expectException(GenAiFatalException::class);
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
     }
 
     public function test_converse_throws_fatal_exception_on_403(): void
@@ -178,7 +204,7 @@ class AnthropicClientTest extends TestCase
         Http::fake(['*' => Http::response(['error' => ['type' => 'permission_error']], 403)]);
 
         $this->expectException(GenAiFatalException::class);
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['type' => 'text', 'text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
     }
 
     // ── converseWithInlineFile ────────────────────────────────────────────────

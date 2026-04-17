@@ -3,8 +3,13 @@
 namespace Bherila\GenAiLaravel\Tests\Unit;
 
 use Bherila\GenAiLaravel\Clients\GeminiClient;
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\Schema;
+use Bherila\GenAiLaravel\ToolChoice;
+use Bherila\GenAiLaravel\ToolConfig;
+use Bherila\GenAiLaravel\ToolDefinition;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Orchestra\Testbench\TestCase;
@@ -148,10 +153,10 @@ class GeminiClientTest extends TestCase
     {
         Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
 
-        $toolConfig = [
-            'tools' => [['function_declarations' => [['name' => 'my_fn']]]],
-            'toolConfig' => ['functionCallingConfig' => ['mode' => 'ANY']],
-        ];
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('my_fn', 'desc', Schema::object(['x' => Schema::string()]))],
+            choice: ToolChoice::any(),
+        );
 
         $this->makeClient()->converseWithFileRef('files/abc', 'application/pdf', 'prompt', $toolConfig);
 
@@ -203,7 +208,7 @@ class GeminiClientTest extends TestCase
             base64_encode('bytes'),
             'application/pdf',
             'prompt',
-            [['text' => 'You are an expert.']],
+            'You are an expert.',
         );
 
         Http::assertSent(function (Request $req) {
@@ -211,21 +216,126 @@ class GeminiClientTest extends TestCase
         });
     }
 
-    // ── converse (text-only) ──────────────────────────────────────────────────
+    public function test_converse_with_inline_file_omits_system_instruction_when_empty(): void
+    {
+        Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
+
+        $this->makeClient()->converseWithInlineFile(base64_encode('bytes'), 'application/pdf', 'prompt');
+
+        Http::assertSent(fn (Request $req) => ! array_key_exists('systemInstruction', $req->data()));
+    }
+
+    // ── converse ─────────────────────────────────────────────────────────────
 
     public function test_converse_maps_assistant_role_to_model(): void
     {
         Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
 
-        $this->makeClient()->converse([], [
-            ['role' => 'user', 'content' => [['text' => 'Hello']]],
-            ['role' => 'assistant', 'content' => [['text' => 'Hi']]],
+        $this->makeClient()->converse('', [
+            ['role' => 'user', 'content' => [ContentBlock::text('Hello')]],
+            ['role' => 'assistant', 'content' => [ContentBlock::text('Hi')]],
         ]);
 
         Http::assertSent(function (Request $req) {
             $contents = $req->data()['contents'];
 
             return $contents[1]['role'] === 'model';
+        });
+    }
+
+    public function test_converse_sends_system_instruction(): void
+    {
+        Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
+
+        $this->makeClient()->converse('Be concise.', [
+            ['role' => 'user', 'content' => [ContentBlock::text('hi')]],
+        ]);
+
+        Http::assertSent(function (Request $req) {
+            return ($req->data()['systemInstruction']['parts'][0]['text'] ?? null) === 'Be concise.';
+        });
+    }
+
+    public function test_converse_omits_system_instruction_when_empty(): void
+    {
+        Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
+
+        $this->makeClient()->converse('', [
+            ['role' => 'user', 'content' => [ContentBlock::text('hi')]],
+        ]);
+
+        Http::assertSent(fn (Request $req) => ! array_key_exists('systemInstruction', $req->data()));
+    }
+
+    public function test_converse_document_block_renders_as_inline_data(): void
+    {
+        Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
+
+        $base64 = base64_encode('pdf');
+        $this->makeClient()->converse('', [
+            ['role' => 'user', 'content' => [
+                ContentBlock::document($base64, 'application/pdf'),
+                ContentBlock::text('Summarize.'),
+            ]],
+        ]);
+
+        Http::assertSent(function (Request $req) use ($base64) {
+            $parts = $req->data()['contents'][0]['parts'] ?? [];
+            foreach ($parts as $part) {
+                if (($part['inline_data']['data'] ?? null) === $base64) {
+                    return true;
+                }
+            }
+
+            return false;
+        });
+    }
+
+    public function test_tool_config_converts_schema_to_gemini_uppercase(): void
+    {
+        Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
+
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('extract', 'Extract data', Schema::object([
+                'amount' => Schema::number('Dollar amount'),
+                'label' => Schema::string(),
+            ], required: ['amount']))],
+            choice: ToolChoice::any(),
+        );
+
+        $this->makeClient()->converse('', [
+            ['role' => 'user', 'content' => [ContentBlock::text('hi')]],
+        ], $toolConfig);
+
+        Http::assertSent(function (Request $req) {
+            $decls = $req->data()['tools'][0]['function_declarations'][0] ?? [];
+            $params = $decls['parameters'] ?? [];
+
+            return ($params['type'] ?? '') === 'OBJECT'
+                && ($params['properties']['amount']['type'] ?? '') === 'NUMBER'
+                && ($params['properties']['label']['type'] ?? '') === 'STRING'
+                && ($req->data()['toolConfig']['functionCallingConfig']['mode'] ?? '') === 'ANY';
+        });
+    }
+
+    public function test_tool_choice_tool_sets_allowed_function_names(): void
+    {
+        Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
+
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('my_fn', 'desc', Schema::object([]))],
+            choice: ToolChoice::tool('my_fn'),
+        );
+
+        $this->makeClient()->converse('', [
+            ['role' => 'user', 'content' => [ContentBlock::text('hi')]],
+        ], $toolConfig);
+
+        Http::assertSent(function (Request $req) {
+            $cfg = $req->data()['toolConfig']['functionCallingConfig'] ?? [];
+
+            return ($cfg['mode'] ?? '') === 'ANY'
+                && ($cfg['allowedFunctionNames'][0] ?? '') === 'my_fn';
         });
     }
 

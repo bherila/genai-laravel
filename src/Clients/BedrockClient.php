@@ -2,10 +2,14 @@
 
 namespace Bherila\GenAiLaravel\Clients;
 
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\ToolChoice;
+use Bherila\GenAiLaravel\ToolConfig;
+use Bherila\GenAiLaravel\ToolDefinition;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -13,10 +17,10 @@ use Illuminate\Support\Facades\Log;
  * AWS Bedrock Converse API implementation of GenAiClient.
  *
  * Bedrock does not have a separate File API — files must be embedded as base64
- * inline document blocks. uploadFile() and deleteFile() are therefore no-ops.
- * Use converseWithInlineFile() to send documents.
+ * inline document blocks. uploadFile() returns null and deleteFile() is a no-op.
  *
- * Supports session tokens for temporary IAM credentials.
+ * ToolConfig is translated to Bedrock toolSpec + toolChoice format.
+ * ContentBlock objects are converted to Bedrock content block format.
  *
  * Config keys (all under genai.providers.bedrock):
  *   api_key        — AWS access key ID
@@ -33,12 +37,6 @@ class BedrockClient implements GenAiClient
 
     private \Illuminate\Http\Client\PendingRequest $http;
 
-    /**
-     * @param  string  $apiKey      AWS access key ID (used as Bearer token for Bedrock).
-     * @param  string  $modelId     Full Bedrock model ID or inference profile ARN.
-     * @param  string  $region      AWS region.
-     * @param  string  $sessionToken  Optional STS session token for temporary credentials.
-     */
     public function __construct(
         string $apiKey,
         string $modelId,
@@ -70,71 +68,52 @@ class BedrockClient implements GenAiClient
         return 4_718_592; // 4.5 MB
     }
 
-    /**
-     * Bedrock has no File API — always returns null.
-     * Use converseWithInlineFile() to send documents.
-     */
+    /** Bedrock has no File API — always returns null. */
     public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
     {
         return null;
     }
 
-    /**
-     * No-op: Bedrock does not store uploaded files.
-     */
+    /** No-op: Bedrock does not store uploaded files. */
     public function deleteFile(string $fileRef): void {}
 
-    /**
-     * Not applicable for Bedrock — use converseWithInlineFile() instead.
-     *
-     * @throws \LogicException
-     */
-    public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?array $toolConfig = null): array
+    /** @throws \LogicException */
+    public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
     {
         throw new \LogicException('Bedrock does not support file references. Use converseWithInlineFile() with base64-encoded bytes.');
     }
 
     /**
      * Send a Converse API request with a single base64-encoded document block.
-     *
-     * @param  list<array{text: string}>  $system
-     * @param  array<string, mixed>|null  $toolConfig  Bedrock toolConfig shape.
-     * @return array<string, mixed>
      */
-    public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, array $system = [], ?array $toolConfig = null): array
+    public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, string $system = '', ?ToolConfig $toolConfig = null): array
     {
         $messages = [[
             'role' => 'user',
             'content' => [
-                [
-                    'document' => [
-                        'format' => $this->mimeToFormat($mimeType),
-                        'name' => 'document',
-                        'source' => ['bytes' => $fileBytes],
-                    ],
-                ],
-                ['text' => $prompt],
+                ContentBlock::document($fileBytes, $mimeType),
+                ContentBlock::text($prompt),
             ],
         ]];
 
-        return $this->converse($system, $messages, $toolConfig ?? []);
+        return $this->converse($system, $messages, $toolConfig);
     }
 
     /**
-     * @param  list<array{text: string}>  $system
-     * @param  list<array{role: string, content: list<array<string, mixed>>}>  $messages
-     * @param  array<string, mixed>|null  $toolConfig
-     * @return array<string, mixed>
+     * @param  list<array{role: string, content: list<ContentBlock>}>  $messages
      */
-    public function converse(array $system, array $messages, ?array $toolConfig = null): array
+    public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array
     {
         $payload = [
-            'system' => $system,
-            'messages' => $messages,
+            'messages' => $this->convertMessages($messages),
         ];
 
-        if ($toolConfig !== null && $toolConfig !== []) {
-            $payload['toolConfig'] = $toolConfig;
+        if ($system !== '') {
+            $payload['system'] = [['text' => $system]];
+        }
+
+        if ($toolConfig !== null) {
+            $payload['toolConfig'] = $this->toolConfigToBedrock($toolConfig);
         }
 
         $response = $this->http
@@ -202,9 +181,56 @@ class BedrockClient implements GenAiClient
         return $calls;
     }
 
-    /**
-     * Map a MIME type to the Bedrock document format string.
-     */
+    // ── Internal helpers ─────────────────────────────────────────────────────
+
+    /** @param  list<array{role: string, content: list<ContentBlock>}>  $messages */
+    private function convertMessages(array $messages): array
+    {
+        return array_map(function (array $msg) {
+            return [
+                'role' => $msg['role'],
+                'content' => array_map(
+                    fn (ContentBlock $b) => $this->contentBlockToBedrock($b),
+                    $msg['content'],
+                ),
+            ];
+        }, $messages);
+    }
+
+    private function contentBlockToBedrock(ContentBlock $block): array
+    {
+        if ($block->type === 'document') {
+            return [
+                'document' => [
+                    'format' => $this->mimeToFormat($block->mimeType ?? ''),
+                    'name' => 'document',
+                    'source' => ['bytes' => $block->base64],
+                ],
+            ];
+        }
+
+        return ['text' => $block->text ?? ''];
+    }
+
+    private function toolConfigToBedrock(ToolConfig $config): array
+    {
+        $tools = array_map(fn (ToolDefinition $t) => [
+            'toolSpec' => [
+                'name' => $t->name,
+                'description' => $t->description,
+                'inputSchema' => ['json' => $t->inputSchema->toArray()],
+            ],
+        ], $config->tools);
+
+        $toolChoice = match ($config->choice->type) {
+            ToolChoice::ANY => ['any' => (object) []],
+            ToolChoice::TOOL => ['tool' => ['name' => $config->choice->toolName]],
+            default => ['auto' => (object) []],
+        };
+
+        return ['tools' => $tools, 'toolChoice' => $toolChoice];
+    }
+
     private function mimeToFormat(string $mimeType): string
     {
         return match ($mimeType) {

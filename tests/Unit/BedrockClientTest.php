@@ -3,8 +3,13 @@
 namespace Bherila\GenAiLaravel\Tests\Unit;
 
 use Bherila\GenAiLaravel\Clients\BedrockClient;
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\Schema;
+use Bherila\GenAiLaravel\ToolChoice;
+use Bherila\GenAiLaravel\ToolConfig;
+use Bherila\GenAiLaravel\ToolDefinition;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Orchestra\Testbench\TestCase;
@@ -41,7 +46,6 @@ class BedrockClientTest extends TestCase
 
     public function test_delete_file_is_noop(): void
     {
-        // Should not throw
         $this->makeClient()->deleteFile('files/abc');
         $this->addToAssertionCount(1);
     }
@@ -60,20 +64,28 @@ class BedrockClientTest extends TestCase
             '*' => Http::response(['output' => ['message' => ['content' => []]]], 200),
         ]);
 
-        $client = $this->makeClient();
-        $client->converse(
-            system: [['text' => 'You are helpful.']],
-            messages: [['role' => 'user', 'content' => [['text' => 'Hello']]]],
-            toolConfig: null,
+        $this->makeClient()->converse(
+            system: 'You are helpful.',
+            messages: [['role' => 'user', 'content' => [ContentBlock::text('Hello')]]],
         );
 
         Http::assertSent(function (Request $req) {
             $body = $req->data();
 
-            return $body['system'][0]['text'] === 'You are helpful.'
-                && $body['messages'][0]['role'] === 'user'
+            return ($body['system'][0]['text'] ?? null) === 'You are helpful.'
+                && ($body['messages'][0]['role'] ?? null) === 'user'
+                && ($body['messages'][0]['content'][0]['text'] ?? null) === 'Hello'
                 && ! array_key_exists('toolConfig', $body);
         });
+    }
+
+    public function test_converse_omits_system_when_empty(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        Http::assertSent(fn (Request $req) => ! array_key_exists('system', $req->data()));
     }
 
     public function test_converse_includes_tool_config_when_provided(): void
@@ -82,8 +94,12 @@ class BedrockClientTest extends TestCase
             '*' => Http::response(['output' => ['message' => ['content' => []]]], 200),
         ]);
 
-        $toolConfig = ['tools' => [['toolSpec' => ['name' => 'my_tool']]]];
-        $this->makeClient()->converse([], [], $toolConfig);
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('my_tool', 'desc', Schema::object([]))],
+            choice: ToolChoice::any(),
+        );
+
+        $this->makeClient()->converse('', [], $toolConfig);
 
         Http::assertSent(function (Request $req) {
             return array_key_exists('toolConfig', $req->data());
@@ -94,7 +110,7 @@ class BedrockClientTest extends TestCase
     {
         Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
 
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
 
         Http::assertSent(fn (Request $req) => $req->header('Authorization')[0] === 'Bearer test-key');
     }
@@ -104,7 +120,7 @@ class BedrockClientTest extends TestCase
         Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
 
         $client = new BedrockClient('key', 'model', 'us-east-1', 'my-session-token');
-        $client->converse([], [['role' => 'user', 'content' => [['text' => 'hi']]]]);
+        $client->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
 
         Http::assertSent(fn (Request $req) => $req->header('X-Amz-Security-Token')[0] === 'my-session-token');
     }
@@ -114,7 +130,7 @@ class BedrockClientTest extends TestCase
         Http::fake(['*' => Http::response(['message' => 'Too Many Requests'], 429)]);
 
         $this->expectException(GenAiRateLimitException::class);
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
     }
 
     public function test_converse_throws_fatal_exception_on_400(): void
@@ -122,7 +138,7 @@ class BedrockClientTest extends TestCase
         Http::fake(['*' => Http::response(['message' => 'Bad Request'], 400)]);
 
         $this->expectException(GenAiFatalException::class);
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['text' => 'hi']]]]);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
     }
 
     // ── converseWithInlineFile ────────────────────────────────────────────────
@@ -161,6 +177,49 @@ class BedrockClientTest extends TestCase
             }
 
             return false;
+        });
+    }
+
+    // ── tool config conversion ────────────────────────────────────────────────
+
+    public function test_tool_config_converts_to_bedrock_tool_spec(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('extract_data', 'Extract fields', Schema::object([
+                'amount' => Schema::number('Dollar amount'),
+                'date' => Schema::string(),
+            ], required: ['amount']))],
+            choice: ToolChoice::any(),
+        );
+
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]], $toolConfig);
+
+        Http::assertSent(function (Request $req) {
+            $tc = $req->data()['toolConfig'] ?? [];
+            $spec = $tc['tools'][0]['toolSpec'] ?? [];
+
+            return ($spec['name'] ?? '') === 'extract_data'
+                && isset($spec['inputSchema']['json']['properties']);
+        });
+    }
+
+    public function test_any_tool_choice_encodes_as_empty_object_not_array(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('my_tool', 'desc', Schema::object([]))],
+            choice: ToolChoice::any(),
+        );
+
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]], $toolConfig);
+
+        Http::assertSent(function (Request $req) {
+            $raw = $req->body();
+
+            return str_contains($raw, '"any":{}');
         });
     }
 
@@ -233,25 +292,5 @@ class BedrockClientTest extends TestCase
     {
         $response = ['output' => ['message' => ['content' => [['text' => 'no tools here']]]]];
         $this->assertSame([], $this->makeClient()->extractToolCalls($response));
-    }
-
-    // ── tool_choice encoding (regression for issue #557) ──────────────────────
-
-    public function test_any_tool_choice_encodes_as_empty_object_not_array(): void
-    {
-        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
-
-        $toolConfig = [
-            'tools' => [['toolSpec' => ['name' => 'my_tool', 'description' => 'test', 'inputSchema' => ['json' => ['type' => 'object']]]]],
-            'toolChoice' => ['any' => (object) []],
-        ];
-
-        $this->makeClient()->converse([], [['role' => 'user', 'content' => [['text' => 'hi']]]], $toolConfig);
-
-        Http::assertSent(function (Request $req) {
-            $raw = $req->body();
-
-            return str_contains($raw, '"any":{}');
-        });
     }
 }

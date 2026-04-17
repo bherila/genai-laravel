@@ -3,21 +3,12 @@
 namespace Bherila\GenAiLaravel;
 
 /**
- * Fluent builder helpers for AI tool / function-calling schemas.
- *
- * Supports both Gemini-style (UPPERCASE type strings) and JSON Schema style
- * (lowercase, used by Bedrock/Anthropic). Use the provider-specific methods
- * or the common JSON Schema methods depending on your target.
- *
- * Usage (Gemini — UPPERCASE types):
- *   use Bherila\GenAiLaravel\ToolDefinitionBuilder as Tdb;
- *   'price' => Tdb::number(),
- *   'name'  => Tdb::string(),
- *   'items' => Tdb::arrayOf(Tdb::object(['id' => Tdb::number()])),
- *
- * Usage (Bedrock/JSON Schema — lowercase types):
- *   'price' => Tdb::jsonNumber(),
- *   'name'  => Tdb::jsonString(),
+ * @deprecated Use Schema, ToolDefinition, ToolChoice, and ToolConfig instead.
+ *   Schema::string()  replaces  ToolDefinitionBuilder::string() / jsonString()
+ *   Schema::number()  replaces  ToolDefinitionBuilder::number() / jsonNumber()
+ *   Schema::object()  replaces  ToolDefinitionBuilder::object() / jsonObject()
+ *   new ToolDefinition($name, $desc, Schema::object(...))  replaces  functionDefinition() / bedrockToolSpec()
+ *   new ToolConfig([$toolDef], ToolChoice::any())  replaces the provider-specific toolConfig arrays
  */
 class ToolDefinitionBuilder
 {
