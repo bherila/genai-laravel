@@ -225,10 +225,16 @@ class BedrockClient implements GenAiClient
         $toolChoice = match ($config->choice->type) {
             ToolChoice::ANY => ['any' => (object) []],
             ToolChoice::TOOL => ['tool' => ['name' => $config->choice->toolName]],
+            ToolChoice::NONE => null,
             default => ['auto' => (object) []],
         };
 
-        return ['tools' => $tools, 'toolChoice' => $toolChoice];
+        $result = ['tools' => $tools];
+        if ($toolChoice !== null) {
+            $result['toolChoice'] = $toolChoice;
+        }
+
+        return $result;
     }
 
     private function mimeToFormat(string $mimeType): string

@@ -121,8 +121,8 @@ class GeminiClient implements GenAiClient
         $payload = [
             'contents' => [[
                 'parts' => [
-                    ['text' => $prompt],
                     ['file_data' => ['mime_type' => $mimeType, 'file_uri' => $fileRef]],
+                    ['text' => $prompt],
                 ],
             ]],
         ];
@@ -140,8 +140,8 @@ class GeminiClient implements GenAiClient
         $payload = [
             'contents' => [[
                 'parts' => [
-                    ['text' => $prompt],
                     ['inline_data' => ['mime_type' => $mimeType, 'data' => $fileBytes]],
+                    ['text' => $prompt],
                 ],
             ]],
         ];

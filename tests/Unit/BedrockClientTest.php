@@ -223,6 +223,24 @@ class BedrockClientTest extends TestCase
         });
     }
 
+    public function test_none_tool_choice_omits_tool_choice_key(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('my_tool', 'desc', Schema::object([]))],
+            choice: ToolChoice::none(),
+        );
+
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]], $toolConfig);
+
+        Http::assertSent(function (Request $req) {
+            $body = $req->data();
+
+            return isset($body['toolConfig']['tools']) && ! array_key_exists('toolChoice', $body['toolConfig']);
+        });
+    }
+
     // ── extractText ───────────────────────────────────────────────────────────
 
     public function test_extract_text_returns_concatenated_text_blocks(): void

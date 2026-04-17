@@ -149,6 +149,19 @@ class GeminiClientTest extends TestCase
         });
     }
 
+    public function test_converse_with_file_ref_puts_file_before_text(): void
+    {
+        Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
+
+        $this->makeClient()->converseWithFileRef('files/abc', 'application/pdf', 'prompt');
+
+        Http::assertSent(function (Request $req) {
+            $parts = $req->data()['contents'][0]['parts'] ?? [];
+
+            return isset($parts[0]['file_data']) && isset($parts[1]['text']);
+        });
+    }
+
     public function test_converse_with_file_ref_applies_tool_config(): void
     {
         Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
@@ -197,6 +210,19 @@ class GeminiClientTest extends TestCase
             }
 
             return false;
+        });
+    }
+
+    public function test_converse_with_inline_file_puts_file_before_text(): void
+    {
+        Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
+
+        $this->makeClient()->converseWithInlineFile(base64_encode('bytes'), 'application/pdf', 'prompt');
+
+        Http::assertSent(function (Request $req) {
+            $parts = $req->data()['contents'][0]['parts'] ?? [];
+
+            return isset($parts[0]['inline_data']) && isset($parts[1]['text']);
         });
     }
 
