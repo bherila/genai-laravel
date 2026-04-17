@@ -2,10 +2,14 @@
 
 namespace Bherila\GenAiLaravel\Clients;
 
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\ToolChoice;
+use Bherila\GenAiLaravel\ToolConfig;
+use Bherila\GenAiLaravel\ToolDefinition;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -13,8 +17,10 @@ use Illuminate\Support\Facades\Log;
  * Anthropic Messages API implementation of GenAiClient.
  *
  * Uses the direct Anthropic API (api.anthropic.com), not AWS Bedrock.
- * Files must be embedded as base64 inline content blocks — there is no
- * persistent File API. Use converseWithInlineFile() to send documents.
+ * Files must be embedded as base64 inline content blocks — uploadFile() returns null.
+ *
+ * ToolConfig is translated to Anthropic tools + tool_choice format.
+ * ContentBlock objects are converted to Anthropic content block format.
  *
  * Config keys (all under genai.providers.anthropic):
  *   api_key    — Anthropic API key
@@ -63,51 +69,31 @@ class AnthropicClient implements GenAiClient
         return 4_718_592; // 4.5 MB
     }
 
-    /**
-     * Anthropic direct API has no persistent File API — always returns null.
-     * Use converseWithInlineFile() to send documents.
-     */
+    /** Anthropic direct API has no persistent File API — always returns null. */
     public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
     {
         return null;
     }
 
-    /**
-     * No-op: Anthropic direct API does not store uploaded files.
-     */
+    /** No-op: Anthropic direct API does not store uploaded files. */
     public function deleteFile(string $fileRef): void {}
 
-    /**
-     * Not applicable for Anthropic direct API — use converseWithInlineFile() instead.
-     *
-     * @throws \LogicException
-     */
-    public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?array $toolConfig = null): array
+    /** @throws \LogicException */
+    public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
     {
         throw new \LogicException('Anthropic direct API does not support file references. Use converseWithInlineFile() with base64-encoded bytes.');
     }
 
     /**
      * Send a Messages API request with a single base64-encoded document block.
-     *
-     * @param  list<array{text: string}>  $system
-     * @param  array<string, mixed>|null  $toolConfig  Anthropic toolConfig shape: {tools: [...], tool_choice: {...}}.
-     * @return array<string, mixed>
      */
-    public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, array $system = [], ?array $toolConfig = null): array
+    public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, string $system = '', ?ToolConfig $toolConfig = null): array
     {
         $messages = [[
             'role' => 'user',
             'content' => [
-                [
-                    'type' => 'document',
-                    'source' => [
-                        'type' => 'base64',
-                        'media_type' => $mimeType,
-                        'data' => $fileBytes,
-                    ],
-                ],
-                ['type' => 'text', 'text' => $prompt],
+                ContentBlock::document($fileBytes, $mimeType),
+                ContentBlock::text($prompt),
             ],
         ]];
 
@@ -115,33 +101,24 @@ class AnthropicClient implements GenAiClient
     }
 
     /**
-     * @param  list<array{text: string}>  $system
-     * @param  list<array{role: string, content: list<array<string, mixed>>}>  $messages  Anthropic-format content blocks.
-     * @param  array<string, mixed>|null  $toolConfig  Shape: {tools: [...], tool_choice: {...}}.
-     * @return array<string, mixed>
+     * @param  list<array{role: string, content: list<ContentBlock>}>  $messages
      */
-    public function converse(array $system, array $messages, ?array $toolConfig = null): array
+    public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array
     {
         $payload = [
             'model' => $this->model,
             'max_tokens' => $this->maxTokens,
-            'messages' => $messages,
+            'messages' => $this->convertMessages($messages),
         ];
 
-        if ($system !== []) {
-            $payload['system'] = array_map(
-                fn ($block) => ['type' => 'text', 'text' => $block['text'] ?? ''],
-                $system,
-            );
+        if ($system !== '') {
+            $payload['system'] = [['type' => 'text', 'text' => $system]];
         }
 
-        if ($toolConfig !== null && $toolConfig !== []) {
-            if (isset($toolConfig['tools'])) {
-                $payload['tools'] = $toolConfig['tools'];
-            }
-            if (isset($toolConfig['tool_choice'])) {
-                $payload['tool_choice'] = $toolConfig['tool_choice'];
-            }
+        if ($toolConfig !== null) {
+            $native = $this->toolConfigToAnthropic($toolConfig);
+            $payload['tools'] = $native['tools'];
+            $payload['tool_choice'] = $native['tool_choice'];
         }
 
         $response = $this->http->post(self::API_BASE.'/v1/messages', $payload);
@@ -203,5 +180,55 @@ class AnthropicClient implements GenAiClient
         }
 
         return $calls;
+    }
+
+    // ── Internal helpers ─────────────────────────────────────────────────────
+
+    /** @param  list<array{role: string, content: list<ContentBlock>}>  $messages */
+    private function convertMessages(array $messages): array
+    {
+        return array_map(function (array $msg) {
+            return [
+                'role' => $msg['role'],
+                'content' => array_map(
+                    fn (ContentBlock $b) => $this->contentBlockToAnthropic($b),
+                    $msg['content'],
+                ),
+            ];
+        }, $messages);
+    }
+
+    private function contentBlockToAnthropic(ContentBlock $block): array
+    {
+        if ($block->type === 'document') {
+            return [
+                'type' => 'document',
+                'source' => [
+                    'type' => 'base64',
+                    'media_type' => $block->mimeType,
+                    'data' => $block->base64,
+                ],
+            ];
+        }
+
+        return ['type' => 'text', 'text' => $block->text ?? ''];
+    }
+
+    private function toolConfigToAnthropic(ToolConfig $config): array
+    {
+        $tools = array_map(fn (ToolDefinition $t) => [
+            'name' => $t->name,
+            'description' => $t->description,
+            'input_schema' => $t->inputSchema->toArray(),
+        ], $config->tools);
+
+        $toolChoice = match ($config->choice->type) {
+            ToolChoice::ANY => ['type' => 'any'],
+            ToolChoice::NONE => ['type' => 'none'],
+            ToolChoice::TOOL => ['type' => 'tool', 'name' => $config->choice->toolName],
+            default => ['type' => 'auto'],
+        };
+
+        return ['tools' => $tools, 'tool_choice' => $toolChoice];
     }
 }

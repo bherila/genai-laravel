@@ -2,9 +2,14 @@
 
 namespace Bherila\GenAiLaravel\Clients;
 
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
+use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\ToolChoice;
+use Bherila\GenAiLaravel\ToolConfig;
+use Bherila\GenAiLaravel\ToolDefinition;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -13,6 +18,10 @@ use Illuminate\Support\Facades\Log;
  *
  * Uses the Gemini File API for file uploads (avoids embedding large base64 blobs
  * in every request) and the generateContent API for inference.
+ *
+ * ToolConfig is translated to Gemini function_declarations + functionCallingConfig.
+ * Schema types are converted from JSON Schema (lowercase) to Gemini (UPPERCASE).
+ * ContentBlock objects are converted to Gemini parts format.
  *
  * Config keys (all under genai.providers.gemini):
  *   api_key  — required; may be per-user or site-wide
@@ -55,23 +64,18 @@ class GeminiClient implements GenAiClient
     /**
      * Upload a file to the Gemini File API.
      *
-     * Accepts a stream resource or a raw binary string.
-     * Returns the file URI (e.g., "files/abc123xyz") for use in converseWithFileRef().
-     * The file is automatically deleted after 48 hours by Google.
-     *
      * @param  resource|string  $fileContent
      */
     public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
     {
         $name = $displayName !== '' ? $displayName : 'genai-upload-'.time();
 
-        $request = Http::withHeaders(['x-goog-api-key' => $this->apiKey])
+        $response = Http::withHeaders(['x-goog-api-key' => $this->apiKey])
             ->attach('file', $fileContent, 'upload', ['Content-Type' => $mimeType])
-            ->withOptions(['timeout' => $this->timeout]);
-
-        $response = $request->post(self::FILE_API_URL, [
-            'file' => ['display_name' => $name],
-        ]);
+            ->withOptions(['timeout' => $this->timeout])
+            ->post(self::FILE_API_URL, [
+                'file' => ['display_name' => $name],
+            ]);
 
         if (! $response->successful()) {
             Log::error('Gemini File API upload failed', [
@@ -111,84 +115,58 @@ class GeminiClient implements GenAiClient
 
     /**
      * Send a generateContent request referencing an already-uploaded file.
-     *
-     * @param  array<string, mixed>|null  $toolConfig  Gemini tool config shape:
-     *   ['tools' => [['function_declarations' => [...]]], 'toolConfig' => ['functionCallingConfig' => [...]]]
-     * @return array<string, mixed>
      */
-    public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?array $toolConfig = null): array
+    public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
     {
         $payload = [
             'contents' => [[
                 'parts' => [
-                    ['text' => $prompt],
                     ['file_data' => ['mime_type' => $mimeType, 'file_uri' => $fileRef]],
+                    ['text' => $prompt],
                 ],
             ]],
         ];
 
-        if ($toolConfig !== null) {
-            $payload = array_merge($payload, $toolConfig);
-        } else {
-            $payload['generationConfig'] = ['response_mime_type' => 'application/json'];
-        }
+        $payload = $this->applyToolConfig($payload, $toolConfig);
 
         return $this->doGenerateContent($payload);
     }
 
     /**
      * Send a generateContent request with base64-encoded file bytes embedded inline.
-     *
-     * @param  list<array{text: string}>  $system
-     * @param  array<string, mixed>|null  $toolConfig
-     * @return array<string, mixed>
      */
-    public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, array $system = [], ?array $toolConfig = null): array
+    public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, string $system = '', ?ToolConfig $toolConfig = null): array
     {
-        $parts = [
-            ['text' => $prompt],
-            ['inline_data' => ['mime_type' => $mimeType, 'data' => $fileBytes]],
-        ];
-
-        // Gemini doesn't have a dedicated system instruction in generateContent for all models,
-        // but v1beta supports systemInstruction for Gemini 1.5+
         $payload = [
-            'contents' => [['parts' => $parts]],
+            'contents' => [[
+                'parts' => [
+                    ['inline_data' => ['mime_type' => $mimeType, 'data' => $fileBytes]],
+                    ['text' => $prompt],
+                ],
+            ]],
         ];
 
-        if ($system !== []) {
-            $payload['systemInstruction'] = [
-                'parts' => array_map(fn ($s) => ['text' => $s['text']], $system),
-            ];
+        if ($system !== '') {
+            $payload['systemInstruction'] = ['parts' => [['text' => $system]]];
         }
 
-        if ($toolConfig !== null) {
-            $payload = array_merge($payload, $toolConfig);
-        } else {
-            $payload['generationConfig'] = ['response_mime_type' => 'application/json'];
-        }
+        $payload = $this->applyToolConfig($payload, $toolConfig);
 
         return $this->doGenerateContent($payload);
     }
 
     /**
-     * Text-only conversation turn.
-     * Gemini maps system prompts to systemInstruction; messages map to contents.
+     * Text-only (or multi-modal via ContentBlock) conversation turn.
      *
-     * @param  list<array{text: string}>  $system
-     * @param  list<array{role: string, content: list<array<string, mixed>>}>  $messages
-     * @param  array<string, mixed>|null  $toolConfig
-     * @return array<string, mixed>
+     * @param  list<array{role: string, content: list<ContentBlock>}>  $messages
      */
-    public function converse(array $system, array $messages, ?array $toolConfig = null): array
+    public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array
     {
         $contents = [];
         foreach ($messages as $message) {
             $parts = [];
             foreach ($message['content'] as $block) {
-                if (isset($block['text'])) {
-                    $parts[] = ['text' => $block['text']];
-                }
+                $parts[] = $this->contentBlockToGeminiPart($block);
             }
             $contents[] = [
                 'role' => $message['role'] === 'assistant' ? 'model' : 'user',
@@ -198,17 +176,11 @@ class GeminiClient implements GenAiClient
 
         $payload = ['contents' => $contents];
 
-        if ($system !== []) {
-            $payload['systemInstruction'] = [
-                'parts' => array_map(fn ($s) => ['text' => $s['text']], $system),
-            ];
+        if ($system !== '') {
+            $payload['systemInstruction'] = ['parts' => [['text' => $system]]];
         }
 
-        if ($toolConfig !== null) {
-            $payload = array_merge($payload, $toolConfig);
-        } else {
-            $payload['generationConfig'] = ['response_mime_type' => 'application/json'];
-        }
+        $payload = $this->applyToolConfig($payload, $toolConfig);
 
         return $this->doGenerateContent($payload);
     }
@@ -260,11 +232,105 @@ class GeminiClient implements GenAiClient
             }
             $calls[] = [
                 'name' => (string) $fn['name'],
-                'input' => is_array($fn['args']) ? $fn['args'] : [],
+                'input' => is_array($fn['args'] ?? null) ? $fn['args'] : [],
             ];
         }
 
         return $calls;
+    }
+
+    // ── Internal helpers ─────────────────────────────────────────────────────
+
+    private function contentBlockToGeminiPart(ContentBlock $block): array
+    {
+        return match ($block->type) {
+            'document' => ['inline_data' => ['mime_type' => $block->mimeType, 'data' => $block->base64]],
+            default => ['text' => $block->text ?? ''],
+        };
+    }
+
+    /**
+     * Merge toolConfig into the payload, or fall back to JSON-mode generation.
+     */
+    private function applyToolConfig(array $payload, ?ToolConfig $toolConfig): array
+    {
+        if ($toolConfig !== null) {
+            return array_merge($payload, $this->toolConfigToGemini($toolConfig));
+        }
+
+        $payload['generationConfig'] = ['response_mime_type' => 'application/json'];
+
+        return $payload;
+    }
+
+    private function toolConfigToGemini(ToolConfig $config): array
+    {
+        $functionDeclarations = array_map(fn (ToolDefinition $t) => [
+            'name' => $t->name,
+            'description' => $t->description,
+            'parameters' => $this->schemaToGemini($t->inputSchema->toArray()),
+        ], $config->tools);
+
+        $mode = match ($config->choice->type) {
+            ToolChoice::AUTO => 'AUTO',
+            ToolChoice::ANY => 'ANY',
+            ToolChoice::NONE => 'NONE',
+            ToolChoice::TOOL => 'ANY',
+        };
+
+        $functionCallingConfig = ['mode' => $mode];
+        if ($config->choice->type === ToolChoice::TOOL && $config->choice->toolName !== null) {
+            $functionCallingConfig['allowedFunctionNames'] = [$config->choice->toolName];
+        }
+
+        return [
+            'tools' => [['function_declarations' => $functionDeclarations]],
+            'toolConfig' => ['functionCallingConfig' => $functionCallingConfig],
+        ];
+    }
+
+    /** Recursively convert JSON Schema (lowercase) to Gemini schema (UPPERCASE). */
+    private function schemaToGemini(array $jsonSchema): array
+    {
+        $typeMap = [
+            'string' => 'STRING',
+            'number' => 'NUMBER',
+            'integer' => 'INTEGER',
+            'boolean' => 'BOOLEAN',
+            'object' => 'OBJECT',
+            'array' => 'ARRAY',
+        ];
+
+        // Handle nullable union types like ['string', 'null']
+        $rawType = $jsonSchema['type'] ?? 'string';
+        if (is_array($rawType)) {
+            $rawType = array_values(array_filter($rawType, fn ($t) => $t !== 'null'))[0] ?? 'string';
+        }
+
+        $result = ['type' => $typeMap[$rawType] ?? strtoupper($rawType)];
+
+        if (isset($jsonSchema['description'])) {
+            $result['description'] = $jsonSchema['description'];
+        }
+        if (isset($jsonSchema['enum'])) {
+            $result['enum'] = $jsonSchema['enum'];
+        }
+
+        if ($rawType === 'object' && isset($jsonSchema['properties'])) {
+            $result['properties'] = array_map(
+                fn ($prop) => $this->schemaToGemini($prop),
+                $jsonSchema['properties'],
+            );
+            if (! empty($jsonSchema['required'])) {
+                $result['required'] = $jsonSchema['required'];
+            }
+        }
+
+        if ($rawType === 'array' && isset($jsonSchema['items'])) {
+            $result['items'] = $this->schemaToGemini($jsonSchema['items']);
+        }
+
+        return $result;
     }
 
     /**
@@ -273,6 +339,7 @@ class GeminiClient implements GenAiClient
      *
      * @throws GenAiRateLimitException
      * @throws GenAiFatalException
+     * @throws GenAiException
      */
     private function doGenerateContent(array $payload): array
     {
