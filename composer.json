@@ -12,12 +12,12 @@
     ],
     "require": {
         "php": "^8.2",
-        "illuminate/contracts": "^10|^11|^12|^13",
-        "illuminate/support": "^10|^11|^12|^13",
-        "illuminate/http": "^10|^11|^12|^13"
+        "illuminate/contracts": "^12|^13",
+        "illuminate/support": "^12|^13",
+        "illuminate/http": "^12|^13"
     },
     "require-dev": {
-        "orchestra/testbench": "^8|^9|^10|^11",
+        "orchestra/testbench": "^10|^11",
         "phpunit/phpunit": "^10|^11",
         "laravel/pint": "^1"
     },
@@ -40,6 +40,9 @@
                 "GenAi": "Bherila\\GenAiLaravel\\Facades\\GenAi"
             }
         }
+    },
+    "scripts": {
+        "test": "phpunit"
     },
     "config": {
         "sort-packages": true
