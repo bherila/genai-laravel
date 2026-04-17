@@ -8,8 +8,8 @@ namespace Bherila\GenAiLaravel\Contracts;
  * Each method maps to the provider's native API in the most direct way possible.
  * Implementations handle authentication, retries, and error normalization internally.
  *
- * Supported providers: Google Gemini, AWS Bedrock (Anthropic Claude).
- * Future: Anthropic direct API, OpenAI.
+ * Supported providers: Google Gemini, AWS Bedrock (Anthropic Claude), Anthropic direct API.
+ * Future: OpenAI.
  */
 interface GenAiClient
 {
