@@ -25,6 +25,7 @@ class GenAiClientFactory
         return match ($provider) {
             'gemini' => static::makeGemini(),
             'bedrock' => static::makeBedrock(),
+            'anthropic' => static::makeAnthropic(),
             default => throw new GenAiException("Unknown GenAI provider: {$provider}"),
         };
     }
@@ -59,6 +60,23 @@ class GenAiClientFactory
             modelId: $cfg['model'] ?? 'us.anthropic.claude-haiku-4-20250514-v1:0',
             region: $cfg['region'] ?? 'us-east-1',
             sessionToken: $cfg['session_token'] ?? '',
+        );
+    }
+
+    private static function makeAnthropic(): AnthropicClient
+    {
+        $cfg = config('genai.providers.anthropic', []);
+        $apiKey = $cfg['api_key'] ?? '';
+
+        if ($apiKey === '') {
+            throw new GenAiException('genai.providers.anthropic.api_key is not set.');
+        }
+
+        return new AnthropicClient(
+            apiKey: $apiKey,
+            model: $cfg['model'] ?? 'claude-sonnet-4-6',
+            maxTokens: (int) ($cfg['max_tokens'] ?? 8192),
+            timeout: (int) ($cfg['timeout'] ?? 240),
         );
     }
 }

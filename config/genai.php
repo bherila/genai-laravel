@@ -5,8 +5,9 @@ return [
     |--------------------------------------------------------------------------
     | Default GenAI Provider
     |--------------------------------------------------------------------------
-    | "gemini"  — Google Gemini (generateContent + File API)
-    | "bedrock" — AWS Bedrock Converse API (Claude models)
+    | "gemini"    — Google Gemini (generateContent + File API)
+    | "bedrock"   — AWS Bedrock Converse API (Claude models)
+    | "anthropic" — Anthropic Messages API (direct, not via Bedrock)
     */
     'default' => env('GENAI_PROVIDER', 'gemini'),
 
@@ -27,6 +28,25 @@ return [
 
             // HTTP timeout in seconds for long-running inference calls.
             'timeout' => (int) env('GEMINI_TIMEOUT', 240),
+        ],
+
+        /*
+        |--------------------------------------------------------------------------
+        | Anthropic Messages API (direct)
+        |--------------------------------------------------------------------------
+        */
+        'anthropic' => [
+            // API key from https://console.anthropic.com/
+            'api_key' => env('ANTHROPIC_API_KEY'),
+
+            // Model ID. See https://docs.anthropic.com/en/docs/about-claude/models
+            'model' => env('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
+
+            // Maximum tokens in the response.
+            'max_tokens' => (int) env('ANTHROPIC_MAX_TOKENS', 8192),
+
+            // HTTP timeout in seconds for long-running inference calls.
+            'timeout' => (int) env('ANTHROPIC_TIMEOUT', 240),
         ],
 
         /*

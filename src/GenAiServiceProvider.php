@@ -18,6 +18,7 @@ class GenAiServiceProvider extends ServiceProvider
         // Named bindings for explicit provider selection in DI.
         $this->app->bind('genai.gemini', fn () => GenAiClientFactory::make('gemini'));
         $this->app->bind('genai.bedrock', fn () => GenAiClientFactory::make('bedrock'));
+        $this->app->bind('genai.anthropic', fn () => GenAiClientFactory::make('anthropic'));
     }
 
     public function boot(): void
