@@ -233,6 +233,35 @@ The three input buckets are non-overlapping (the Gemini adapter subtracts
 `cachedContentTokenCount` from `promptTokenCount` to match Anthropic/Bedrock
 semantics), so summing them gives total input work billed.
 
+## Listing models
+
+Every client implements `listModels(): ModelInfo[]`, hitting each provider's
+catalog endpoint and normalising the result:
+
+```php
+$client = GenAi::client('anthropic'); // or 'bedrock', 'gemini'
+
+foreach ($client->listModels() as $model) {
+    $model->id;                          // call-ready identifier
+    $model->name;                        // human-readable display name
+    $model->provider;                    // "anthropic" | "bedrock" | "gemini"
+    $model->description;                 // free-form, when provided
+    $model->inputTokenLimit;             // context window, when advertised
+    $model->outputTokenLimit;            // max completion tokens, when advertised
+    $model->inputCostPerMillionTokens;   // null — no provider returns pricing
+    $model->outputCostPerMillionTokens;  // null — no provider returns pricing
+    $model->raw;                         // provider-specific entry
+}
+```
+
+Endpoints used: Anthropic `GET /v1/models`, Bedrock
+`GET https://bedrock.{region}.amazonaws.com/foundation-models` (control-plane,
+not `bedrock-runtime`), Gemini `GET /v1beta/models`. Gemini entries that don't
+support `generateContent` (embeddings, etc.) are filtered out. None of the
+provider catalog APIs currently return pricing, so the cost fields are nullable
+— populate them yourself from your own pricing table if you need cost tracking
+alongside model selection.
+
 ## Providers
 
 | Feature | Gemini | Bedrock | Anthropic |
@@ -242,6 +271,8 @@ semantics), so summing them gives total input work billed.
 | Tool/function calling | ✅ | ✅ | ✅ |
 | File size limit | 20 MB | 4.5 MB | 4.5 MB |
 | System prompts | ✅ | ✅ | ✅ |
+| `listModels()` | ✅ | ✅ (control-plane) | ✅ |
+| Pricing in catalog | ❌ | ❌ | ❌ |
 
 ## License
 

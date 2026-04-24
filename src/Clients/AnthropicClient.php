@@ -7,6 +7,7 @@ use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
@@ -59,6 +60,11 @@ class AnthropicClient implements GenAiClient
     public function provider(): string
     {
         return 'anthropic';
+    }
+
+    public function model(): string
+    {
+        return $this->model;
     }
 
     /**
@@ -181,6 +187,63 @@ class AnthropicClient implements GenAiClient
         }
 
         return $calls;
+    }
+
+    /**
+     * List models available to this Anthropic API key.
+     *
+     * Paginates via the `after_id` cursor until `has_more` is false.
+     * Anthropic does not return pricing in this endpoint — cost fields are null.
+     *
+     * @return list<ModelInfo>
+     */
+    public function listModels(): array
+    {
+        $models = [];
+        $afterId = null;
+
+        do {
+            $query = ['limit' => 1000];
+            if ($afterId !== null) {
+                $query['after_id'] = $afterId;
+            }
+
+            $response = $this->http->get(self::API_BASE.'/v1/models', $query);
+
+            if (! $response->successful()) {
+                Log::error('Anthropic list models failed', [
+                    'status' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+
+                if ($response->status() === 429) {
+                    throw new GenAiRateLimitException('Anthropic API rate limit exceeded.');
+                }
+                if (in_array($response->status(), [400, 401, 403, 404], true)) {
+                    throw new GenAiFatalException('Anthropic API error: '.$response->body());
+                }
+                throw new GenAiException('Anthropic API error '.$response->status().': '.$response->body());
+            }
+
+            $payload = $response->json() ?? [];
+            foreach ($payload['data'] ?? [] as $entry) {
+                $id = (string) ($entry['id'] ?? '');
+                if ($id === '') {
+                    continue;
+                }
+                $models[] = new ModelInfo(
+                    id: $id,
+                    name: (string) ($entry['display_name'] ?? $id),
+                    provider: 'anthropic',
+                    raw: is_array($entry) ? $entry : [],
+                );
+            }
+
+            $hasMore = (bool) ($payload['has_more'] ?? false);
+            $afterId = $hasMore ? ($payload['last_id'] ?? null) : null;
+        } while ($afterId !== null);
+
+        return $models;
     }
 
     /**
