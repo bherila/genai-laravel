@@ -64,6 +64,11 @@ class BedrockClient implements GenAiClient
         return 'bedrock';
     }
 
+    public function model(): string
+    {
+        return $this->modelId;
+    }
+
     /**
      * Bedrock Converse API hard limit per document block.
      * https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference-supported-models-features.html

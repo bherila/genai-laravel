@@ -25,6 +25,12 @@ interface GenAiClient
     public function provider(): string;
 
     /**
+     * The model identifier in use (e.g. "claude-sonnet-4-6", "gemini-2.0-flash").
+     * Used for logging and audit records so callers do not need to read provider config.
+     */
+    public function model(): string;
+
+    /**
      * Hard limit in bytes for a single file/document block this provider accepts.
      */
     public static function maxFileBytes(): int;

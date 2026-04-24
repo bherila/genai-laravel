@@ -62,6 +62,11 @@ class AnthropicClient implements GenAiClient
         return 'anthropic';
     }
 
+    public function model(): string
+    {
+        return $this->model;
+    }
+
     /**
      * Anthropic API limit per base64 document block.
      * https://docs.anthropic.com/en/docs/build-with-claude/files

@@ -54,6 +54,11 @@ class GeminiClient implements GenAiClient
         return 'gemini';
     }
 
+    public function model(): string
+    {
+        return $this->model;
+    }
+
     /**
      * Gemini File API limit: 2 GB per file.
      * In practice, keep documents under 20 MB for reliable extraction.
