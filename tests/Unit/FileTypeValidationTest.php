@@ -34,7 +34,7 @@ class FileTypeValidationTest extends TestCase
         $this->assertFalse(AnthropicClient::isSupportedDocumentMimeType('text/csv'));
     }
 
-    public function test_anthropic_rejects_docx_when_phpword_absent(): void
+    public function test_anthropic_throws_on_malformed_docx(): void
     {
         // Sanity check: if neither phpword nor a PDF renderer were installed,
         // the client would throw upfront. With the dev-deps present, this path

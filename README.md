@@ -334,4 +334,4 @@ formats), so no conversion runs for Bedrock requests.
 
 ## License
 
-This package is released under the [MIT License](LICENSE.md).
+This package is released under the [MIT License](LICENSE).

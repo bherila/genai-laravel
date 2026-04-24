@@ -82,7 +82,9 @@ final class SpreadsheetToText
         }
 
         try {
-            file_put_contents($tmp, $bytes);
+            if (file_put_contents($tmp, $bytes) === false) {
+                throw new GenAiFatalException('SpreadsheetToText: failed to write temp file.');
+            }
 
             try {
                 $spreadsheet = IOFactory::load($tmp);

@@ -121,7 +121,9 @@ final class WordDocumentToPdf
         }
 
         try {
-            file_put_contents($inputTmp, $bytes);
+            if (file_put_contents($inputTmp, $bytes) === false) {
+                throw new GenAiFatalException('WordDocumentToPdf: failed to write temp input file.');
+            }
 
             Settings::setPdfRendererName($renderer[0]);
             // PhpWord requires a real readable directory here. It's only used to

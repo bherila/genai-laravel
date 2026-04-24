@@ -58,6 +58,17 @@ class SpreadsheetToTextTest extends TestCase
         $this->assertStringContainsString("Acme\tBoston", $text);
     }
 
+    public function test_converts_csv_to_tab_separated_text(): void
+    {
+        $csv = "Name,City\nAcme,Boston\nWidgets,Portland\n";
+        $text = SpreadsheetToText::convert(base64_encode($csv), 'text/csv');
+
+        $this->assertStringContainsString('Name', $text);
+        $this->assertStringContainsString('Acme', $text);
+        $this->assertStringContainsString('Boston', $text);
+        $this->assertStringContainsString('Widgets', $text);
+    }
+
     public function test_rejects_unsupported_mime_type(): void
     {
         $this->expectException(GenAiFatalException::class);
