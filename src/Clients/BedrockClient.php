@@ -192,58 +192,86 @@ class BedrockClient implements GenAiClient
     }
 
     /**
-     * List foundation models available in this Bedrock region.
+     * List models available in this Bedrock region.
      *
-     * Hits the Bedrock *control-plane* endpoint (`bedrock.REGION.amazonaws.com`)
-     * rather than the runtime endpoint used for inference. Returns the union of
-     * all providers available through Bedrock — filter by ModelInfo::$raw['providerName']
-     * if you only want Anthropic / Meta / etc.
+     * Calls two control-plane endpoints and merges the results:
+     * - `/foundation-models`  — base models (no pagination)
+     * - `/inference-profiles` — cross-region inference profiles, e.g.
+     *   `us.anthropic.claude-haiku-4-20250514-v1:0` (paginated via nextToken)
+     *
+     * Filter by ModelInfo::$raw['providerName'] or ModelInfo::$raw['type'] to
+     * narrow to a specific provider or profile type (SYSTEM_DEFINED / APPLICATION).
      *
      * @return list<ModelInfo>
      */
     public function listModels(): array
     {
-        $url = "https://bedrock.{$this->region}.amazonaws.com/foundation-models";
-        $response = $this->http->get($url);
-
-        if (! $response->successful()) {
-            Log::error('Bedrock list foundation models failed', [
-                'status' => $response->status(),
-                'body' => $response->body(),
-            ]);
-
-            if ($response->status() === 429) {
-                throw new GenAiRateLimitException('Bedrock rate limit exceeded.');
-            }
-            if (in_array($response->status(), [400, 401, 403, 404], true)) {
-                throw new GenAiFatalException('Bedrock list models error: '.$response->body());
-            }
-            throw new GenAiException('Bedrock API error '.$response->status().': '.$response->body());
-        }
-
-        $payload = $response->json() ?? [];
+        $baseUrl = "https://bedrock.{$this->region}.amazonaws.com";
         $models = [];
-        foreach ($payload['modelSummaries'] ?? [] as $entry) {
+
+        // Foundation models — single page, no pagination.
+        $response = $this->http->get("{$baseUrl}/foundation-models");
+        if (! $response->successful()) {
+            $this->throwListModelsError($response, 'foundation-models');
+        }
+        foreach ($response->json()['modelSummaries'] ?? [] as $entry) {
             $id = (string) ($entry['modelId'] ?? '');
             if ($id === '') {
                 continue;
             }
             $name = (string) ($entry['modelName'] ?? $id);
             $provider = $entry['providerName'] ?? null;
-            $description = is_string($provider) && $provider !== ''
-                ? "Provider: {$provider}"
-                : null;
-
             $models[] = new ModelInfo(
                 id: $id,
                 name: $name,
                 provider: 'bedrock',
-                description: $description,
+                description: is_string($provider) && $provider !== '' ? "Provider: {$provider}" : null,
                 raw: is_array($entry) ? $entry : [],
             );
         }
 
+        // Inference profiles — paginated; includes cross-region profiles missing from /foundation-models.
+        $nextToken = null;
+        do {
+            $params = $nextToken !== null ? ['nextToken' => $nextToken] : [];
+            $response = $this->http->get("{$baseUrl}/inference-profiles", $params);
+            if (! $response->successful()) {
+                $this->throwListModelsError($response, 'inference-profiles');
+            }
+            $payload = $response->json() ?? [];
+            foreach ($payload['inferenceProfileSummaries'] ?? [] as $entry) {
+                $id = (string) ($entry['inferenceProfileId'] ?? '');
+                if ($id === '') {
+                    continue;
+                }
+                $models[] = new ModelInfo(
+                    id: $id,
+                    name: (string) ($entry['inferenceProfileName'] ?? $id),
+                    provider: 'bedrock',
+                    description: isset($entry['description']) && $entry['description'] !== '' ? (string) $entry['description'] : null,
+                    raw: is_array($entry) ? $entry : [],
+                );
+            }
+            $nextToken = isset($payload['nextToken']) && is_string($payload['nextToken']) ? $payload['nextToken'] : null;
+        } while ($nextToken !== null);
+
         return $models;
+    }
+
+    private function throwListModelsError(\Illuminate\Http\Client\Response $response, string $endpoint): never
+    {
+        Log::error("Bedrock list {$endpoint} failed", [
+            'status' => $response->status(),
+            'body' => $response->body(),
+        ]);
+
+        if ($response->status() === 429) {
+            throw new GenAiRateLimitException('Bedrock rate limit exceeded.');
+        }
+        if (in_array($response->status(), [400, 401, 403, 404], true)) {
+            throw new GenAiFatalException('Bedrock list models error: '.$response->body());
+        }
+        throw new GenAiException('Bedrock API error '.$response->status().': '.$response->body());
     }
 
     /**
