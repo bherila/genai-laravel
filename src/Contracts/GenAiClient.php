@@ -4,6 +4,7 @@ namespace Bherila\GenAiLaravel\Contracts;
 
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\ToolConfig;
+use Bherila\GenAiLaravel\Usage;
 
 /**
  * Provider-agnostic contract for GenAI clients.
@@ -84,4 +85,16 @@ interface GenAiClient
      * @return list<array{name: string, input: array<string, mixed>}>
      */
     public function extractToolCalls(array $response): array;
+
+    /**
+     * Extract normalised token-usage data from a raw provider response.
+     *
+     * Returns Usage::empty() when the provider omits usage (e.g. streaming chunks,
+     * error responses). Token counts are mapped into non-overlapping buckets so
+     * inputTokens + cacheReadInputTokens + cacheCreationInputTokens reflects total
+     * input work billed.
+     *
+     * @param  array<string, mixed>  $response
+     */
+    public function extractUsage(array $response): Usage;
 }

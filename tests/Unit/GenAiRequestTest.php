@@ -9,6 +9,7 @@ use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
+use Bherila\GenAiLaravel\Usage;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Orchestra\Testbench\TestCase;
@@ -172,6 +173,7 @@ class GenAiRequestTest extends TestCase
                 ['name' => 'fn_a', 'input' => ['x' => 1]],
                 ['name' => 'fn_b', 'input' => ['y' => 2]],
             ],
+            usage: Usage::empty(),
             raw: [],
         );
 
@@ -187,6 +189,7 @@ class GenAiRequestTest extends TestCase
                 ['name' => 'fn_a', 'input' => []],
                 ['name' => 'fn_b', 'input' => ['y' => 42]],
             ],
+            usage: Usage::empty(),
             raw: [],
         );
 
@@ -198,7 +201,7 @@ class GenAiRequestTest extends TestCase
 
     public function test_response_has_no_tool_calls_when_empty(): void
     {
-        $response = new GenAiResponse(text: 'hi', toolCalls: [], raw: []);
+        $response = new GenAiResponse(text: 'hi', toolCalls: [], usage: Usage::empty(), raw: []);
         $this->assertFalse($response->hasToolCalls());
         $this->assertNull($response->firstToolCall());
     }

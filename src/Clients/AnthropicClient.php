@@ -10,6 +10,7 @@ use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
+use Bherila\GenAiLaravel\Usage;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -180,6 +181,37 @@ class AnthropicClient implements GenAiClient
         }
 
         return $calls;
+    }
+
+    /**
+     * Extract normalised token usage from an Anthropic Messages API response.
+     *
+     * Anthropic reports input_tokens as non-cached input (cache_read and
+     * cache_creation are separate buckets), so the three input fields are
+     * already non-overlapping.
+     *
+     * @param  array<string, mixed>  $response
+     */
+    public function extractUsage(array $response): Usage
+    {
+        $u = $response['usage'] ?? null;
+        if (! is_array($u)) {
+            return Usage::empty();
+        }
+
+        $input = (int) ($u['input_tokens'] ?? 0);
+        $output = (int) ($u['output_tokens'] ?? 0);
+        $cacheRead = (int) ($u['cache_read_input_tokens'] ?? 0);
+        $cacheCreate = (int) ($u['cache_creation_input_tokens'] ?? 0);
+
+        return new Usage(
+            inputTokens: $input,
+            outputTokens: $output,
+            totalTokens: $input + $cacheRead + $cacheCreate + $output,
+            cacheReadInputTokens: $cacheRead,
+            cacheCreationInputTokens: $cacheCreate,
+            raw: $u,
+        );
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────

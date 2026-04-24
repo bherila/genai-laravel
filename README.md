@@ -198,10 +198,40 @@ $response = GenAi::converse($system, $messages, $toolConfig);
 |---|---|
 | `->text` | Concatenated text output |
 | `->toolCalls` | `[['name' => '...', 'input' => [...]], ...]` |
+| `->usage` | Normalised `Usage` (tokens, cache tokens) — see below |
 | `->raw` | Provider-specific raw response array |
 | `->hasToolCalls()` | Whether the model called any tool |
 | `->firstToolCall()` | First tool call, or `null` |
 | `->toolCallByName('fn')` | Named tool call, or `null` |
+
+### Token usage and cost
+
+Every response exposes a `Usage` object with provider-agnostic token counts. The
+clients normalise the three different wire shapes (Anthropic `input_tokens` /
+Bedrock `inputTokens` / Gemini `promptTokenCount`) into one API:
+
+```php
+$response = GenAiRequest::with($client)->prompt('...')->generate();
+
+$response->usage->inputTokens;              // non-cached prompt tokens
+$response->usage->outputTokens;             // completion tokens
+$response->usage->totalTokens;
+$response->usage->cacheReadInputTokens;     // served from prompt cache
+$response->usage->cacheCreationInputTokens; // written to prompt cache
+$response->usage->raw;                      // provider-specific payload
+
+// Estimate cost in USD given per-million-token prices for the model you used.
+$cost = $response->usage->estimatedCostUsd(
+    inputPerMillion: 3.00,
+    outputPerMillion: 15.00,
+    cacheReadPerMillion: 0.30,
+    cacheCreationPerMillion: 3.75,
+);
+```
+
+The three input buckets are non-overlapping (the Gemini adapter subtracts
+`cachedContentTokenCount` from `promptTokenCount` to match Anthropic/Bedrock
+semantics), so summing them gives total input work billed.
 
 ## Providers
 
