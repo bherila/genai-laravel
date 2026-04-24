@@ -7,6 +7,7 @@ use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -35,6 +36,33 @@ class AnthropicClient implements GenAiClient
     private const API_BASE = 'https://api.anthropic.com';
 
     private const API_VERSION = '2023-06-01';
+
+    /**
+     * MIME types the Anthropic Messages API accepts as a `document` content block.
+     *
+     * Per https://platform.claude.com/docs/en/build-with-claude/files, everything
+     * else (docx, csv, md, html, …) must be converted to plain text by the caller
+     * and sent inline as a text block. Spreadsheets (xlsx/xls/ods/csv) are converted
+     * automatically when phpoffice/phpspreadsheet is installed.
+     */
+    private const SUPPORTED_DOCUMENT_MIME_TYPES = [
+        'application/pdf',
+        'text/plain',
+    ];
+
+    /**
+     * MIME types accepted as an Anthropic `image` content block.
+     *
+     * See https://platform.claude.com/docs/en/build-with-claude/vision — these
+     * are sent through a different wire shape than documents, so the client
+     * routes them to the image block automatically.
+     */
+    private const SUPPORTED_IMAGE_MIME_TYPES = [
+        'image/jpeg',
+        'image/png',
+        'image/gif',
+        'image/webp',
+    ];
 
     private string $model;
 
@@ -74,6 +102,39 @@ class AnthropicClient implements GenAiClient
     public static function maxFileBytes(): int
     {
         return 4_718_592; // 4.5 MB
+    }
+
+    /**
+     * MIME types accepted by the Anthropic document block.
+     *
+     * @return list<string>
+     */
+    public static function supportedDocumentMimeTypes(): array
+    {
+        return self::SUPPORTED_DOCUMENT_MIME_TYPES;
+    }
+
+    /**
+     * Cheap upfront check so callers can reject files before building a request.
+     */
+    public static function isSupportedDocumentMimeType(string $mimeType): bool
+    {
+        return in_array($mimeType, self::SUPPORTED_DOCUMENT_MIME_TYPES, true);
+    }
+
+    /**
+     * MIME types accepted as an Anthropic image block (vision).
+     *
+     * @return list<string>
+     */
+    public static function supportedImageMimeTypes(): array
+    {
+        return self::SUPPORTED_IMAGE_MIME_TYPES;
+    }
+
+    public static function isSupportedImageMimeType(string $mimeType): bool
+    {
+        return in_array($mimeType, self::SUPPORTED_IMAGE_MIME_TYPES, true);
     }
 
     /** Anthropic direct API has no persistent File API — always returns null. */
@@ -296,14 +357,50 @@ class AnthropicClient implements GenAiClient
     private function contentBlockToAnthropic(ContentBlock $block): array
     {
         if ($block->type === 'document') {
-            return [
-                'type' => 'document',
-                'source' => [
-                    'type' => 'base64',
-                    'media_type' => $block->mimeType,
-                    'data' => $block->base64,
-                ],
-            ];
+            $mime = (string) $block->mimeType;
+
+            if (self::isSupportedDocumentMimeType($mime)) {
+                return [
+                    'type' => 'document',
+                    'source' => [
+                        'type' => 'base64',
+                        'media_type' => $mime,
+                        'data' => $block->base64,
+                    ],
+                ];
+            }
+
+            // Images go through the `image` block shape, not `document`.
+            if (self::isSupportedImageMimeType($mime)) {
+                return [
+                    'type' => 'image',
+                    'source' => [
+                        'type' => 'base64',
+                        'media_type' => $mime,
+                        'data' => $block->base64,
+                    ],
+                ];
+            }
+
+            // Spreadsheets (xlsx / xls / ods / csv): inline the extracted cell data
+            // as text rather than failing — Anthropic only accepts pdf and text/plain
+            // as document blocks, so this is the recommended fallback path.
+            if (SpreadsheetToText::supports($mime) && SpreadsheetToText::isAvailable()) {
+                $text = SpreadsheetToText::convert((string) $block->base64, $mime);
+
+                return ['type' => 'text', 'text' => $text];
+            }
+
+            throw new GenAiFatalException(sprintf(
+                'Anthropic Messages API does not accept %s. Documents: %s. Images: %s. '
+                .'Convert other formats (docx, html, …) to plain text and send the '
+                .'extracted content inline as a text block. For spreadsheets, install '
+                .'phpoffice/phpspreadsheet for automatic conversion. '
+                .'See https://platform.claude.com/docs/en/build-with-claude/files',
+                $mime === '' ? '(no MIME type)' : $mime,
+                implode(', ', self::SUPPORTED_DOCUMENT_MIME_TYPES),
+                implode(', ', self::SUPPORTED_IMAGE_MIME_TYPES),
+            ));
         }
 
         return ['type' => 'text', 'text' => $block->text ?? ''];

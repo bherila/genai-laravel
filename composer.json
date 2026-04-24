@@ -18,8 +18,12 @@
     },
     "require-dev": {
         "orchestra/testbench": "^10|^11",
+        "phpoffice/phpspreadsheet": "^4|^5",
         "phpunit/phpunit": "^10|^11",
         "laravel/pint": "^1"
+    },
+    "suggest": {
+        "phpoffice/phpspreadsheet": "Required for automatic XLSX / XLS / ODS → plain-text conversion when sending spreadsheet files to Anthropic or Gemini (^4|^5)."
     },
     "autoload": {
         "psr-4": {

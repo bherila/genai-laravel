@@ -262,6 +262,37 @@ provider catalog APIs currently return pricing, so the cost fields are nullable
 — populate them yourself from your own pricing table if you need cost tracking
 alongside model selection.
 
+## File type support
+
+Each provider accepts a different set of file formats natively. The clients
+validate MIME types up front and fail fast with an actionable error rather than
+round-tripping a request the API is going to reject. Images (PNG / JPEG / GIF /
+WebP) are routed to the correct `image` block shape automatically.
+
+| MIME type              | Gemini            | Bedrock          | Anthropic         |
+|------------------------|-------------------|------------------|-------------------|
+| `application/pdf`      | ✅ (vision)       | ✅ `document`    | ✅ `document`     |
+| `text/plain`           | ✅                | ✅               | ✅ `document`     |
+| `text/markdown`        | ✅ (text only)    | ✅               | convert to text   |
+| `text/html`            | ✅ (text only)    | ✅               | convert to text   |
+| `text/csv`             | convert           | ✅               | auto-convert ⚙️   |
+| `application/xml`      | ✅ (text only)    | —                | convert to text   |
+| `application/msword` (`doc`)           | convert | ✅     | convert to text   |
+| `.docx` (`…wordprocessingml.document`) | convert | ✅     | convert to text   |
+| `application/vnd.ms-excel` (`xls`)     | auto-convert ⚙️ | ✅ | auto-convert ⚙️   |
+| `.xlsx` (`…spreadsheetml.sheet`)       | auto-convert ⚙️ | ✅ | auto-convert ⚙️   |
+| `.ods` (OpenDocument Spreadsheet)      | auto-convert ⚙️ | — | auto-convert ⚙️   |
+| `image/png`, `image/jpeg`, `image/gif`, `image/webp` | ✅ `inline_data` | ✅ `image` block | ✅ `image` block |
+
+⚙️ "auto-convert" requires `phpoffice/phpspreadsheet` (installed as a `suggest`
+in this package). With it present, spreadsheets passed to Anthropic or Gemini
+are extracted to tab-separated plain text and sent as a text block rather than
+being rejected. Without it, the client throws `GenAiFatalException` with
+instructions. Bedrock handles these natively, so no conversion runs.
+
+For other types the package does not convert for you (`.doc`, `.docx`, `.html`
+for Anthropic, etc.), extract the text yourself and pass it with `->prompt($text)`.
+
 ## Providers
 
 | Feature | Gemini | Bedrock | Anthropic |
@@ -273,7 +304,10 @@ alongside model selection.
 | System prompts | ✅ | ✅ | ✅ |
 | `listModels()` | ✅ | ✅ (control-plane) | ✅ |
 | Pricing in catalog | ❌ | ❌ | ❌ |
+| Image blocks (PNG/JPEG/GIF/WebP) | ✅ | ✅ | ✅ |
+| Office-format documents | convert | ✅ native | convert |
+| Auto XLSX → text (with phpspreadsheet) | ✅ | n/a | ✅ |
 
 ## License
 
-MIT
+This package is released under the [MIT License](LICENSE.md).
