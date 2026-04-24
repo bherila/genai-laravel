@@ -17,9 +17,17 @@
         "illuminate/http": "^12|^13"
     },
     "require-dev": {
+        "dompdf/dompdf": "^3",
         "orchestra/testbench": "^10|^11",
+        "phpoffice/phpspreadsheet": "^4|^5",
+        "phpoffice/phpword": "^1",
         "phpunit/phpunit": "^10|^11",
         "laravel/pint": "^1"
+    },
+    "suggest": {
+        "dompdf/dompdf": "Required together with phpoffice/phpword to render DOC / DOCX / ODT / RTF to PDF before sending — preserves formatting and lets providers use their native PDF pipelines (Gemini vision, Anthropic document blocks). Not loaded if absent.",
+        "phpoffice/phpspreadsheet": "Enables automatic XLSX / XLS / ODS / CSV → plain-text conversion when sending spreadsheet files to Anthropic or Gemini (^4|^5). Not loaded if absent.",
+        "phpoffice/phpword": "Enables automatic DOC / DOCX / ODT / RTF → PDF conversion (when dompdf/dompdf is also installed) before sending to Anthropic or Gemini. Not loaded if absent."
     },
     "autoload": {
         "psr-4": {

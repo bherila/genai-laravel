@@ -299,9 +299,20 @@ class BedrockClient implements GenAiClient
     private function contentBlockToBedrock(ContentBlock $block): array
     {
         if ($block->type === 'document') {
+            $mime = (string) ($block->mimeType ?? '');
+
+            if (isset(self::MIME_TO_IMAGE_FORMAT[$mime])) {
+                return [
+                    'image' => [
+                        'format' => self::MIME_TO_IMAGE_FORMAT[$mime],
+                        'source' => ['bytes' => $block->base64],
+                    ],
+                ];
+            }
+
             return [
                 'document' => [
-                    'format' => $this->mimeToFormat($block->mimeType ?? ''),
+                    'format' => $this->mimeToFormat($mime),
                     'name' => 'document',
                     'source' => ['bytes' => $block->base64],
                 ],
@@ -336,19 +347,74 @@ class BedrockClient implements GenAiClient
         return $result;
     }
 
+    /**
+     * MIME → Bedrock DocumentBlock.format mapping. Every entry here matches one of
+     * the nine `format` values accepted by the Converse API (pdf, csv, doc, docx,
+     * xls, xlsx, html, txt, md).
+     */
+    private const MIME_TO_FORMAT = [
+        'application/pdf' => 'pdf',
+        'text/csv' => 'csv',
+        'application/msword' => 'doc',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+        'application/vnd.ms-excel' => 'xls',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
+        'text/html' => 'html',
+        'text/plain' => 'txt',
+        'text/markdown' => 'md',
+    ];
+
+    /**
+     * MIME → Bedrock ImageBlock.format mapping. Images use a different block shape
+     * than documents in Bedrock Converse, so the client routes them based on MIME.
+     */
+    private const MIME_TO_IMAGE_FORMAT = [
+        'image/png' => 'png',
+        'image/jpeg' => 'jpeg',
+        'image/gif' => 'gif',
+        'image/webp' => 'webp',
+    ];
+
+    /**
+     * MIME types accepted natively by Bedrock Converse as a document block.
+     *
+     * @return list<string>
+     */
+    public static function supportedDocumentMimeTypes(): array
+    {
+        return array_keys(self::MIME_TO_FORMAT);
+    }
+
+    /**
+     * Cheap upfront check so callers can reject files before building a request.
+     */
+    public static function isSupportedDocumentMimeType(string $mimeType): bool
+    {
+        return isset(self::MIME_TO_FORMAT[$mimeType]);
+    }
+
+    /** @return list<string> */
+    public static function supportedImageMimeTypes(): array
+    {
+        return array_keys(self::MIME_TO_IMAGE_FORMAT);
+    }
+
+    public static function isSupportedImageMimeType(string $mimeType): bool
+    {
+        return isset(self::MIME_TO_IMAGE_FORMAT[$mimeType]);
+    }
+
     private function mimeToFormat(string $mimeType): string
     {
-        return match ($mimeType) {
-            'application/pdf' => 'pdf',
-            'text/csv' => 'csv',
-            'application/msword' => 'doc',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
-            'application/vnd.ms-excel' => 'xls',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
-            'text/html' => 'html',
-            'text/plain' => 'txt',
-            'text/markdown' => 'md',
-            default => 'pdf',
-        };
+        if (! isset(self::MIME_TO_FORMAT[$mimeType])) {
+            throw new GenAiFatalException(sprintf(
+                'Bedrock Converse does not accept %s as a document block. '
+                .'Supported types: %s.',
+                $mimeType === '' ? '(no MIME type)' : $mimeType,
+                implode(', ', array_keys(self::MIME_TO_FORMAT)),
+            ));
+        }
+
+        return self::MIME_TO_FORMAT[$mimeType];
     }
 }

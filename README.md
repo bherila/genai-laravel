@@ -262,6 +262,60 @@ provider catalog APIs currently return pricing, so the cost fields are nullable
 — populate them yourself from your own pricing table if you need cost tracking
 alongside model selection.
 
+## File type support
+
+Each provider accepts a different set of file formats natively. The clients
+validate MIME types up front and fail fast with an actionable error rather than
+round-tripping a request the API is going to reject. Images (PNG / JPEG / GIF /
+WebP) are routed to the correct `image` block shape automatically.
+
+For Anthropic and Gemini — which only accept PDF and text-type documents — this
+package can auto-convert Office formats by treating `phpoffice/phpword` (+ a PDF
+renderer) and `phpoffice/phpspreadsheet` as optional peer dependencies:
+
+- **Word docs (`.doc`, `.docx`, `.odt`, `.rtf`) → PDF** via PhpWord + Dompdf so
+  layout, tables, and fonts survive. The rendered PDF is sent through
+  Anthropic's native PDF pipeline or Gemini's PDF vision pipeline.
+- **Spreadsheets (`.xlsx`, `.xls`, `.ods`, `.csv`) → tab-separated text** via
+  PhpSpreadsheet. Cell data is emitted as a text block with a
+  `=== Sheet: <name> ===` header per sheet.
+
+Neither dependency is in `require` — when a peer is missing the client falls
+back to a clear `GenAiFatalException` telling the caller what to install.
+
+| MIME type              | Gemini            | Bedrock          | Anthropic         |
+|------------------------|-------------------|------------------|-------------------|
+| `application/pdf`      | ✅ (vision)       | ✅ `document`    | ✅ `document`     |
+| `text/plain`           | ✅                | ✅               | ✅ `document`     |
+| `text/markdown`        | ✅ (text only)    | ✅               | convert to text   |
+| `text/html`            | ✅ (text only)    | ✅               | convert to text   |
+| `text/csv`             | auto-convert 📊   | ✅               | auto-convert 📊   |
+| `application/xml`      | ✅ (text only)    | —                | convert to text   |
+| `application/msword` (`.doc`)            | auto-convert 📄 | ✅ | auto-convert 📄 |
+| `.docx` (`…wordprocessingml.document`)   | auto-convert 📄 | ✅ | auto-convert 📄 |
+| `.odt` (OpenDocument Text)               | auto-convert 📄 | — | auto-convert 📄 |
+| `application/rtf`                        | auto-convert 📄 | — | auto-convert 📄 |
+| `application/vnd.ms-excel` (`.xls`)      | auto-convert 📊 | ✅ | auto-convert 📊 |
+| `.xlsx` (`…spreadsheetml.sheet`)         | auto-convert 📊 | ✅ | auto-convert 📊 |
+| `.ods` (OpenDocument Spreadsheet)        | auto-convert 📊 | — | auto-convert 📊 |
+| `image/png`, `image/jpeg`, `image/gif`, `image/webp` | ✅ `inline_data` | ✅ `image` block | ✅ `image` block |
+
+- 📄 Word → PDF requires `phpoffice/phpword` **and** a PhpWord PDF renderer
+  (`dompdf/dompdf` recommended — alternatives: `mpdf/mpdf`, `tecnickcom/tcpdf`).
+  Install with `composer require phpoffice/phpword dompdf/dompdf`.
+- 📊 Spreadsheet → text requires `phpoffice/phpspreadsheet`. Install with
+  `composer require phpoffice/phpspreadsheet`.
+
+Bedrock natively accepts the Office formats via its own `document` block (the
+Converse API lists `pdf, csv, doc, docx, xls, xlsx, html, txt, md` as native
+formats), so no conversion runs for Bedrock requests.
+
+> **Note:** PowerPoint (`.ppt`, `.pptx`, `.odp`) auto-conversion is not
+> included in this PR — the only available PHP library (`phpoffice/phppresentation`)
+> pins an older `phpoffice/phpspreadsheet` version that currently has open
+> security advisories. Until that's resolved upstream, convert PowerPoint files
+> to PDF yourself (e.g. via `libreoffice --convert-to pdf`) before sending them.
+
 ## Providers
 
 | Feature | Gemini | Bedrock | Anthropic |
@@ -273,7 +327,11 @@ alongside model selection.
 | System prompts | ✅ | ✅ | ✅ |
 | `listModels()` | ✅ | ✅ (control-plane) | ✅ |
 | Pricing in catalog | ❌ | ❌ | ❌ |
+| Image blocks (PNG/JPEG/GIF/WebP) | ✅ | ✅ | ✅ |
+| Office-format documents | auto-convert 📄📊 | ✅ native | auto-convert 📄📊 |
+| Auto DOC/DOCX → PDF (with phpword + dompdf) | ✅ | n/a | ✅ |
+| Auto XLSX/XLS/ODS/CSV → text (with phpspreadsheet) | ✅ | n/a | ✅ |
 
 ## License
 
-MIT
+This package is released under the [MIT License](LICENSE).

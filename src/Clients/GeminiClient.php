@@ -7,6 +7,8 @@ use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
+use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -125,6 +127,8 @@ class GeminiClient implements GenAiClient
      */
     public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
     {
+        $this->assertSupportedDocumentMimeType($mimeType);
+
         $payload = [
             'contents' => [[
                 'parts' => [
@@ -144,12 +148,34 @@ class GeminiClient implements GenAiClient
      */
     public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, string $system = '', ?ToolConfig $toolConfig = null): array
     {
+        if (! self::isSupportedDocumentMimeType($mimeType)
+            && WordDocumentToPdf::supports($mimeType)
+            && WordDocumentToPdf::isAvailable()
+        ) {
+            // Word doc → PDF: preserves formatting for Gemini's vision pipeline.
+            $pdfB64 = WordDocumentToPdf::convert($fileBytes, $mimeType);
+            $parts = [
+                ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]],
+                ['text' => $prompt],
+            ];
+        } elseif (! self::isSupportedDocumentMimeType($mimeType)
+            && SpreadsheetToText::supports($mimeType)
+            && SpreadsheetToText::isAvailable()
+        ) {
+            // Spreadsheet fallback: extract cell data to text rather than fail.
+            $extracted = SpreadsheetToText::convert($fileBytes, $mimeType);
+            $parts = [['text' => $extracted], ['text' => $prompt]];
+        } else {
+            $this->assertSupportedDocumentMimeType($mimeType);
+            $parts = [
+                ['inline_data' => ['mime_type' => $mimeType, 'data' => $fileBytes]],
+                ['text' => $prompt],
+            ];
+        }
+
         $payload = [
             'contents' => [[
-                'parts' => [
-                    ['inline_data' => ['mime_type' => $mimeType, 'data' => $fileBytes]],
-                    ['text' => $prompt],
-                ],
+                'parts' => $parts,
             ]],
         ];
 
@@ -352,14 +378,90 @@ class GeminiClient implements GenAiClient
         );
     }
 
+    /**
+     * MIME types that pass Gemini's document-understanding pipeline.
+     *
+     * PDF is the only format with real vision understanding (charts, layout,
+     * formatting). The text/* and application/xml entries are accepted by the
+     * API but the model sees them as extracted plain text — per Google's docs,
+     * "document vision only meaningfully understands PDFs". DOCX / XLSX / other
+     * Office formats are not accepted: convert them to PDF (for layout) or plain
+     * text (for content-only) before sending.
+     *
+     * See https://ai.google.dev/gemini-api/docs/document-processing
+     */
+    private const SUPPORTED_DOCUMENT_MIME_TYPES = [
+        'application/pdf',
+        'text/plain',
+        'text/markdown',
+        'text/html',
+        'application/xml',
+        // Images — Gemini handles all of these via the same inline_data shape
+        // as documents, so no separate block type is needed.
+        'image/jpeg',
+        'image/png',
+        'image/gif',
+        'image/webp',
+    ];
+
+    /** @return list<string> */
+    public static function supportedDocumentMimeTypes(): array
+    {
+        return self::SUPPORTED_DOCUMENT_MIME_TYPES;
+    }
+
+    public static function isSupportedDocumentMimeType(string $mimeType): bool
+    {
+        return in_array($mimeType, self::SUPPORTED_DOCUMENT_MIME_TYPES, true);
+    }
+
+    private function assertSupportedDocumentMimeType(string $mimeType): void
+    {
+        if (self::isSupportedDocumentMimeType($mimeType)) {
+            return;
+        }
+
+        throw new GenAiFatalException(sprintf(
+            'Gemini does not accept %s as a document. '
+            .'Supported types: %s. Only PDF gets native vision understanding; '
+            .'text/* types are extracted as plain text. Install phpoffice/phpword + '
+            .'dompdf/dompdf for automatic doc/docx → PDF, or phpoffice/phpspreadsheet '
+            .'for xlsx/xls/ods/csv → text conversion. '
+            .'See https://ai.google.dev/gemini-api/docs/document-processing',
+            $mimeType === '' ? '(no MIME type)' : $mimeType,
+            implode(', ', self::SUPPORTED_DOCUMENT_MIME_TYPES),
+        ));
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────────
 
     private function contentBlockToGeminiPart(ContentBlock $block): array
     {
-        return match ($block->type) {
-            'document' => ['inline_data' => ['mime_type' => $block->mimeType, 'data' => $block->base64]],
-            default => ['text' => $block->text ?? ''],
-        };
+        if ($block->type === 'document') {
+            $mime = (string) $block->mimeType;
+
+            if (! self::isSupportedDocumentMimeType($mime)
+                && WordDocumentToPdf::supports($mime)
+                && WordDocumentToPdf::isAvailable()
+            ) {
+                $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime);
+
+                return ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]];
+            }
+
+            if (! self::isSupportedDocumentMimeType($mime)
+                && SpreadsheetToText::supports($mime)
+                && SpreadsheetToText::isAvailable()
+            ) {
+                return ['text' => SpreadsheetToText::convert((string) $block->base64, $mime)];
+            }
+
+            $this->assertSupportedDocumentMimeType($mime);
+
+            return ['inline_data' => ['mime_type' => $mime, 'data' => $block->base64]];
+        }
+
+        return ['text' => $block->text ?? ''];
     }
 
     /**
