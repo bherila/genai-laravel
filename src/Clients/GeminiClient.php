@@ -7,6 +7,7 @@ use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
@@ -238,6 +239,75 @@ class GeminiClient implements GenAiClient
         }
 
         return $calls;
+    }
+
+    /**
+     * List models available to this Gemini API key.
+     *
+     * Paginates via `pageToken` until the API stops returning one. The response
+     * filters out models that don't support `generateContent` — those can't be
+     * called through this package so including them would be misleading.
+     *
+     * @return list<ModelInfo>
+     */
+    public function listModels(): array
+    {
+        $models = [];
+        $pageToken = null;
+
+        do {
+            $query = ['pageSize' => 1000];
+            if ($pageToken !== null) {
+                $query['pageToken'] = $pageToken;
+            }
+
+            $response = Http::withHeaders(['x-goog-api-key' => $this->apiKey])
+                ->withOptions(['timeout' => $this->timeout])
+                ->get(self::BASE_URL.'/v1beta/models', $query);
+
+            if (! $response->successful()) {
+                Log::error('Gemini list models failed', [
+                    'status' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+
+                if ($response->status() === 429) {
+                    throw new GenAiRateLimitException('Gemini rate limit exceeded.');
+                }
+                if (in_array($response->status(), [400, 401, 403, 404], true)) {
+                    throw new GenAiFatalException('Gemini list models error: '.$response->body());
+                }
+                throw new GenAiException('Gemini API error '.$response->status().': '.$response->body());
+            }
+
+            $payload = $response->json() ?? [];
+            foreach ($payload['models'] ?? [] as $entry) {
+                $id = (string) ($entry['name'] ?? '');
+                if ($id === '') {
+                    continue;
+                }
+                $methods = $entry['supportedGenerationMethods'] ?? [];
+                if (is_array($methods) && ! in_array('generateContent', $methods, true)) {
+                    continue;
+                }
+
+                $models[] = new ModelInfo(
+                    id: $id,
+                    name: (string) ($entry['displayName'] ?? $id),
+                    provider: 'gemini',
+                    description: isset($entry['description']) && is_string($entry['description']) ? $entry['description'] : null,
+                    inputTokenLimit: isset($entry['inputTokenLimit']) ? (int) $entry['inputTokenLimit'] : null,
+                    outputTokenLimit: isset($entry['outputTokenLimit']) ? (int) $entry['outputTokenLimit'] : null,
+                    raw: is_array($entry) ? $entry : [],
+                );
+            }
+
+            $pageToken = is_string($payload['nextPageToken'] ?? null) && $payload['nextPageToken'] !== ''
+                ? $payload['nextPageToken']
+                : null;
+        } while ($pageToken !== null);
+
+        return $models;
     }
 
     /**

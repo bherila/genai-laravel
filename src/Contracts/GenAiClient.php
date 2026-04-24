@@ -3,6 +3,7 @@
 namespace Bherila\GenAiLaravel\Contracts;
 
 use Bherila\GenAiLaravel\ContentBlock;
+use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\Usage;
 
@@ -85,6 +86,18 @@ interface GenAiClient
      * @return list<array{name: string, input: array<string, mixed>}>
      */
     public function extractToolCalls(array $response): array;
+
+    /**
+     * List models available to this provider's credentials.
+     *
+     * Results are normalised into ModelInfo — provider-specific fields remain
+     * accessible via ModelInfo::$raw. None of the supported providers return
+     * pricing in their catalog, so cost fields are populated only when the
+     * client was configured with an out-of-band pricing table.
+     *
+     * @return list<ModelInfo>
+     */
+    public function listModels(): array;
 
     /**
      * Extract normalised token-usage data from a raw provider response.

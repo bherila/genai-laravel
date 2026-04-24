@@ -7,6 +7,7 @@ use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
@@ -34,6 +35,8 @@ class BedrockClient implements GenAiClient
 {
     private string $modelId;
 
+    private string $region;
+
     private string $endpoint;
 
     private \Illuminate\Http\Client\PendingRequest $http;
@@ -45,6 +48,7 @@ class BedrockClient implements GenAiClient
         string $sessionToken = '',
     ) {
         $this->modelId = $modelId;
+        $this->region = $region;
         $this->endpoint = "https://bedrock-runtime.{$region}.amazonaws.com";
 
         $headers = ['Content-Type' => 'application/json'];
@@ -180,6 +184,61 @@ class BedrockClient implements GenAiClient
         }
 
         return $calls;
+    }
+
+    /**
+     * List foundation models available in this Bedrock region.
+     *
+     * Hits the Bedrock *control-plane* endpoint (`bedrock.REGION.amazonaws.com`)
+     * rather than the runtime endpoint used for inference. Returns the union of
+     * all providers available through Bedrock — filter by ModelInfo::$raw['providerName']
+     * if you only want Anthropic / Meta / etc.
+     *
+     * @return list<ModelInfo>
+     */
+    public function listModels(): array
+    {
+        $url = "https://bedrock.{$this->region}.amazonaws.com/foundation-models";
+        $response = $this->http->get($url);
+
+        if (! $response->successful()) {
+            Log::error('Bedrock list foundation models failed', [
+                'status' => $response->status(),
+                'body' => $response->body(),
+            ]);
+
+            if ($response->status() === 429) {
+                throw new GenAiRateLimitException('Bedrock rate limit exceeded.');
+            }
+            if (in_array($response->status(), [400, 401, 403, 404], true)) {
+                throw new GenAiFatalException('Bedrock list models error: '.$response->body());
+            }
+            throw new GenAiException('Bedrock API error '.$response->status().': '.$response->body());
+        }
+
+        $payload = $response->json() ?? [];
+        $models = [];
+        foreach ($payload['modelSummaries'] ?? [] as $entry) {
+            $id = (string) ($entry['modelId'] ?? '');
+            if ($id === '') {
+                continue;
+            }
+            $name = (string) ($entry['modelName'] ?? $id);
+            $provider = $entry['providerName'] ?? null;
+            $description = is_string($provider) && $provider !== ''
+                ? "Provider: {$provider}"
+                : null;
+
+            $models[] = new ModelInfo(
+                id: $id,
+                name: $name,
+                provider: 'bedrock',
+                description: $description,
+                raw: is_array($entry) ? $entry : [],
+            );
+        }
+
+        return $models;
     }
 
     /**
