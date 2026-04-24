@@ -10,6 +10,7 @@ use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
+use Bherila\GenAiLaravel\Usage;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -179,6 +180,40 @@ class BedrockClient implements GenAiClient
         }
 
         return $calls;
+    }
+
+    /**
+     * Extract normalised token usage from a Bedrock Converse response.
+     *
+     * Bedrock's usage fields mirror Anthropic's semantics: inputTokens is the
+     * non-cached prompt count and cacheReadInputTokens / cacheWriteInputTokens
+     * are separate buckets (present only on cache-supporting models).
+     *
+     * @param  array<string, mixed>  $response
+     */
+    public function extractUsage(array $response): Usage
+    {
+        $u = $response['usage'] ?? null;
+        if (! is_array($u)) {
+            return Usage::empty();
+        }
+
+        $input = (int) ($u['inputTokens'] ?? 0);
+        $output = (int) ($u['outputTokens'] ?? 0);
+        $cacheRead = (int) ($u['cacheReadInputTokens'] ?? 0);
+        $cacheCreate = (int) ($u['cacheWriteInputTokens'] ?? 0);
+        $total = isset($u['totalTokens'])
+            ? (int) $u['totalTokens']
+            : $input + $cacheRead + $cacheCreate + $output;
+
+        return new Usage(
+            inputTokens: $input,
+            outputTokens: $output,
+            totalTokens: $total,
+            cacheReadInputTokens: $cacheRead,
+            cacheCreationInputTokens: $cacheCreate,
+            raw: $u,
+        );
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────

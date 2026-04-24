@@ -10,6 +10,7 @@ use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
+use Bherila\GenAiLaravel\Usage;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -237,6 +238,43 @@ class GeminiClient implements GenAiClient
         }
 
         return $calls;
+    }
+
+    /**
+     * Extract normalised token usage from a Gemini generateContent response.
+     *
+     * Gemini's promptTokenCount is inclusive of cached tokens — we subtract
+     * cachedContentTokenCount so inputTokens represents only the non-cached
+     * prompt portion, matching the non-overlapping bucket contract used by
+     * the Anthropic and Bedrock mappers.
+     *
+     * @param  array<string, mixed>  $response
+     */
+    public function extractUsage(array $response): Usage
+    {
+        $u = $response['usageMetadata'] ?? null;
+        if (! is_array($u)) {
+            return Usage::empty();
+        }
+
+        $prompt = (int) ($u['promptTokenCount'] ?? 0);
+        $output = (int) ($u['candidatesTokenCount'] ?? 0);
+        $cached = (int) ($u['cachedContentTokenCount'] ?? 0);
+        $total = isset($u['totalTokenCount']) ? (int) $u['totalTokenCount'] : $prompt + $output;
+
+        $nonCachedInput = $prompt - $cached;
+        if ($nonCachedInput < 0) {
+            $nonCachedInput = 0;
+        }
+
+        return new Usage(
+            inputTokens: $nonCachedInput,
+            outputTokens: $output,
+            totalTokens: $total,
+            cacheReadInputTokens: $cached,
+            cacheCreationInputTokens: 0,
+            raw: $u,
+        );
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────

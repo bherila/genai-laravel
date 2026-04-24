@@ -124,6 +124,7 @@ final class GenAiRequest
         return new GenAiResponse(
             text: $this->client->extractText($raw),
             toolCalls: $this->client->extractToolCalls($raw),
+            usage: $this->client->extractUsage($raw),
             raw: $raw,
         );
     }

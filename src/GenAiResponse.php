@@ -13,11 +13,13 @@ final class GenAiResponse
     /**
      * @param  string  $text  Concatenated text output from the model.
      * @param  list<array{name: string, input: array<string, mixed>}>  $toolCalls  Tool/function calls made by the model.
+     * @param  Usage  $usage  Normalised token-usage data.
      * @param  array<string, mixed>  $raw  Provider-specific raw response (for advanced use / debugging).
      */
     public function __construct(
         public readonly string $text,
         public readonly array $toolCalls,
+        public readonly Usage $usage,
         public readonly array $raw,
     ) {}
 
