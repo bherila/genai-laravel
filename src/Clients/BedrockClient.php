@@ -33,6 +33,8 @@ use Illuminate\Support\Facades\Log;
  */
 class BedrockClient implements GenAiClient
 {
+    private const MAX_LIST_RETRY_ATTEMPTS = 3;
+
     private string $modelId;
 
     private string $region;
@@ -210,10 +212,8 @@ class BedrockClient implements GenAiClient
         $models = [];
 
         // Foundation models — single page, no pagination.
-        $response = $this->http->get("{$baseUrl}/foundation-models");
-        if (! $response->successful()) {
-            $this->throwListModelsError($response, 'foundation-models');
-        }
+        $response = $this->getWithRetry("{$baseUrl}/foundation-models");
+
         foreach ($response->json()['modelSummaries'] ?? [] as $entry) {
             $id = (string) ($entry['modelId'] ?? '');
             if ($id === '') {
@@ -234,10 +234,8 @@ class BedrockClient implements GenAiClient
         $nextToken = null;
         do {
             $params = $nextToken !== null ? ['nextToken' => $nextToken] : [];
-            $response = $this->http->get("{$baseUrl}/inference-profiles", $params);
-            if (! $response->successful()) {
-                $this->throwListModelsError($response, 'inference-profiles');
-            }
+            $response = $this->getWithRetry("{$baseUrl}/inference-profiles", $params);
+
             $payload = $response->json() ?? [];
             foreach ($payload['inferenceProfileSummaries'] ?? [] as $entry) {
                 $id = (string) ($entry['inferenceProfileId'] ?? '');
@@ -258,6 +256,28 @@ class BedrockClient implements GenAiClient
         return $models;
     }
 
+    /**
+     * GET with retry-on-429 for listModels control-plane calls.
+     * Honors the Retry-After header; falls back to exponential backoff (1s, 2s, 4s…).
+     *
+     * @param  array<string, mixed>  $params
+     */
+    private function getWithRetry(string $url, array $params = []): \Illuminate\Http\Client\Response
+    {
+        for ($attempt = 0; ; $attempt++) {
+            $response = $this->http->get($url, $params);
+            if ($response->successful()) {
+                return $response;
+            }
+            if ($response->status() === 429 && $attempt < self::MAX_LIST_RETRY_ATTEMPTS - 1) {
+                $header = $response->header('Retry-After');
+                sleep($header !== '' ? (int) $header : (1 << $attempt));
+                continue;
+            }
+            $this->throwListModelsError($response, ltrim((string) parse_url($url, PHP_URL_PATH), '/'));
+        }
+    }
+
     private function throwListModelsError(\Illuminate\Http\Client\Response $response, string $endpoint): never
     {
         Log::error("Bedrock list {$endpoint} failed", [
@@ -266,7 +286,8 @@ class BedrockClient implements GenAiClient
         ]);
 
         if ($response->status() === 429) {
-            throw new GenAiRateLimitException('Bedrock rate limit exceeded.');
+            $header = $response->header('Retry-After');
+            throw new GenAiRateLimitException('Bedrock rate limit exceeded.', $header !== '' ? (int) $header : null);
         }
         if (in_array($response->status(), [400, 401, 403, 404], true)) {
             throw new GenAiFatalException('Bedrock list models error: '.$response->body());

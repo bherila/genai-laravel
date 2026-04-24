@@ -208,6 +208,59 @@ class ListModelsTest extends TestCase
         (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
     }
 
+    public function test_bedrock_list_models_retries_on_429_and_succeeds(): void
+    {
+        $callCount = 0;
+        Http::fake([
+            'https://bedrock.us-east-1.amazonaws.com/foundation-models' => function () use (&$callCount) {
+                $callCount++;
+
+                return $callCount === 1
+                    ? Http::response([], 429, ['Retry-After' => '0'])
+                    : Http::response(['modelSummaries' => [['modelId' => 'found-after-retry', 'modelName' => 'M']]]);
+            },
+            'https://bedrock.us-east-1.amazonaws.com/inference-profiles' => Http::response(['inferenceProfileSummaries' => []]),
+        ]);
+
+        $models = (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
+
+        $this->assertCount(1, $models);
+        $this->assertSame('found-after-retry', $models[0]->id);
+        $this->assertSame(2, $callCount);
+    }
+
+    public function test_bedrock_list_models_throws_after_max_retry_attempts(): void
+    {
+        Http::fake([
+            'https://bedrock.us-east-1.amazonaws.com/foundation-models' => Http::response([], 429, ['Retry-After' => '0']),
+        ]);
+
+        $this->expectException(\Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException::class);
+        (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
+    }
+
+    public function test_bedrock_list_models_exposes_retry_after_on_exception(): void
+    {
+        // First two calls (retried) use Retry-After: 0 to avoid sleeping; third exhausts budget with Retry-After: 42.
+        $callCount = 0;
+        Http::fake([
+            'https://bedrock.us-east-1.amazonaws.com/foundation-models' => function () use (&$callCount) {
+                $callCount++;
+                $header = $callCount < 3 ? '0' : '42';
+
+                return Http::response([], 429, ['Retry-After' => $header]);
+            },
+        ]);
+
+        try {
+            (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
+            $this->fail('Expected GenAiRateLimitException');
+        } catch (\Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException $e) {
+            $this->assertSame(42, $e->retryAfter);
+            $this->assertSame(3, $callCount);
+        }
+    }
+
     // ── Gemini ───────────────────────────────────────────────────────────────
 
     public function test_gemini_list_models_normalises_entries(): void
