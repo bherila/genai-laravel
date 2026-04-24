@@ -34,16 +34,17 @@ class FileTypeValidationTest extends TestCase
         $this->assertFalse(AnthropicClient::isSupportedDocumentMimeType('text/csv'));
     }
 
-    public function test_anthropic_rejects_docx_upfront(): void
+    public function test_anthropic_rejects_docx_when_phpword_absent(): void
     {
-        // DOCX has no built-in converter — still rejected upfront (distinct from xlsx).
+        // Sanity check: if neither phpword nor a PDF renderer were installed,
+        // the client would throw upfront. With the dev-deps present, this path
+        // is exercised only by feeding bytes the reader cannot parse.
         Http::fake();
         $client = new AnthropicClient(apiKey: 'test', model: 'claude-sonnet-4-6');
 
         $this->expectException(GenAiFatalException::class);
-        $this->expectExceptionMessageMatches('/does not accept.*Documents:.*Images:/s');
-
-        $client->converseWithInlineFile(base64_encode('docx bytes'), self::DOCX_MIME, 'Summarize.');
+        // Malformed bytes → reader fails → GenAiFatalException from the converter.
+        $client->converseWithInlineFile(base64_encode('not a real docx'), self::DOCX_MIME, 'Summarize.');
     }
 
     public function test_anthropic_rejects_unknown_mime_without_http_call(): void
@@ -215,15 +216,13 @@ class FileTypeValidationTest extends TestCase
         Http::assertSentCount(1);
     }
 
-    public function test_gemini_rejects_docx_upfront(): void
+    public function test_gemini_rejects_malformed_docx(): void
     {
         Http::fake();
         $client = new GeminiClient(apiKey: 'test');
 
         $this->expectException(GenAiFatalException::class);
-        $this->expectExceptionMessageMatches('/Gemini does not accept.*Convert docx \/ xlsx/s');
-
-        $client->converseWithInlineFile(base64_encode('docx'), self::DOCX_MIME, 'Summarize.');
+        $client->converseWithInlineFile(base64_encode('not a real docx'), self::DOCX_MIME, 'Summarize.');
     }
 
     public function test_gemini_accepts_pdf(): void

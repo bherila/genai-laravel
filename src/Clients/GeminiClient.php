@@ -8,6 +8,7 @@ use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
+use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -147,11 +148,21 @@ class GeminiClient implements GenAiClient
      */
     public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, string $system = '', ?ToolConfig $toolConfig = null): array
     {
-        // Spreadsheet fallback: extract cell data to text rather than fail.
         if (! self::isSupportedDocumentMimeType($mimeType)
+            && WordDocumentToPdf::supports($mimeType)
+            && WordDocumentToPdf::isAvailable()
+        ) {
+            // Word doc → PDF: preserves formatting for Gemini's vision pipeline.
+            $pdfB64 = WordDocumentToPdf::convert($fileBytes, $mimeType);
+            $parts = [
+                ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]],
+                ['text' => $prompt],
+            ];
+        } elseif (! self::isSupportedDocumentMimeType($mimeType)
             && SpreadsheetToText::supports($mimeType)
             && SpreadsheetToText::isAvailable()
         ) {
+            // Spreadsheet fallback: extract cell data to text rather than fail.
             $extracted = SpreadsheetToText::convert($fileBytes, $mimeType);
             $parts = [['text' => $extracted], ['text' => $prompt]];
         } else {
@@ -413,8 +424,9 @@ class GeminiClient implements GenAiClient
         throw new GenAiFatalException(sprintf(
             'Gemini does not accept %s as a document. '
             .'Supported types: %s. Only PDF gets native vision understanding; '
-            .'text/* types are extracted as plain text. Convert docx / xlsx / other '
-            .'Office formats to PDF or plain text first. '
+            .'text/* types are extracted as plain text. Install phpoffice/phpword + '
+            .'dompdf/dompdf for automatic doc/docx → PDF, or phpoffice/phpspreadsheet '
+            .'for xlsx/xls/ods/csv → text conversion. '
             .'See https://ai.google.dev/gemini-api/docs/document-processing',
             $mimeType === '' ? '(no MIME type)' : $mimeType,
             implode(', ', self::SUPPORTED_DOCUMENT_MIME_TYPES),
@@ -427,6 +439,15 @@ class GeminiClient implements GenAiClient
     {
         if ($block->type === 'document') {
             $mime = (string) $block->mimeType;
+
+            if (! self::isSupportedDocumentMimeType($mime)
+                && WordDocumentToPdf::supports($mime)
+                && WordDocumentToPdf::isAvailable()
+            ) {
+                $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime);
+
+                return ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]];
+            }
 
             if (! self::isSupportedDocumentMimeType($mime)
                 && SpreadsheetToText::supports($mime)
