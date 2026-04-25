@@ -292,8 +292,42 @@ Endpoints used: Anthropic `GET /v1/models`, Bedrock
 not `bedrock-runtime`), Gemini `GET /v1beta/models`. Gemini entries that don't
 support `generateContent` (embeddings, etc.) are filtered out. None of the
 provider catalog APIs currently return pricing, so the cost fields are nullable
-— populate them yourself from your own pricing table if you need cost tracking
-alongside model selection.
+— populate them yourself via `PricingBook` if you need cost tracking alongside
+model selection.
+
+### Pricing table (`PricingBook`)
+
+Supply your own per-million-token prices for any of the three providers
+(`anthropic`, `bedrock`, `gemini`) and the package will both decorate
+`ModelInfo` and turn `Usage` records into dollar costs:
+
+```php
+use Bherila\GenAiLaravel\PricingBook;
+
+$book = PricingBook::fromArray([
+    'anthropic' => [
+        'claude-sonnet-4-6' => ['input' => 3.0, 'output' => 15.0, 'cache_read' => 0.3, 'cache_creation' => 3.75],
+    ],
+    'bedrock' => [
+        'us.anthropic.claude-haiku-4-20250514-v1:0' => ['input' => 0.8, 'output' => 4.0],
+    ],
+    'gemini' => [
+        'gemini-2.0-flash' => ['input' => 0.1, 'output' => 0.4],
+    ],
+]);
+
+// Decorate listModels() output with prices
+$models = $book->enrichAll($client->listModels());
+
+// Compute cost for a specific call
+$cost = $book->estimateCost($response->usage, $client->provider(), $client->model());
+```
+
+`PricingBook::fromConfig()` reads the same shape from the `genai.pricing` config
+key, so application-wide pricing can live alongside provider config. Existing
+non-null cost fields on a `ModelInfo` are preserved by `enrich()`, and
+`estimateCost()` / `priceFor()` return `null` when no price is registered for
+the requested `(provider, modelId)`.
 
 ## File type support
 
