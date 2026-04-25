@@ -26,8 +26,8 @@ GENAI_PROVIDER=gemini
 GEMINI_API_KEY=your-key
 GEMINI_MODEL=gemini-2.0-flash
 
-# Bedrock
-BEDROCK_API_KEY=your-aws-access-key-id
+# Bedrock — uses Bearer-token auth, not AWS SigV4
+BEDROCK_API_KEY=your-bedrock-bearer-token
 BEDROCK_SESSION_TOKEN=   # optional, for temporary credentials
 BEDROCK_REGION=us-east-1
 BEDROCK_MODEL=us.anthropic.claude-haiku-4-20250514-v1:0
@@ -37,6 +37,13 @@ ANTHROPIC_API_KEY=your-key
 ANTHROPIC_MODEL=claude-sonnet-4-6
 ANTHROPIC_MAX_TOKENS=8192
 ```
+
+> **Bedrock auth:** this package authenticates against Bedrock with a bearer
+> token (`Authorization: Bearer …`), not AWS SigV4. `BEDROCK_API_KEY` is the
+> bearer token itself — there is no separate `BEDROCK_SECRET_KEY`. If you are
+> coming from the AWS SDK and have IAM access-key-ID + secret-access-key
+> credentials, those are not the right shape for this package; use a Bedrock
+> bearer token instead.
 
 ## Usage
 
@@ -232,6 +239,32 @@ $cost = $response->usage->estimatedCostUsd(
 The three input buckets are non-overlapping (the Gemini adapter subtracts
 `cachedContentTokenCount` from `promptTokenCount` to match Anthropic/Bedrock
 semantics), so summing them gives total input work billed.
+
+## Retry behaviour
+
+All providers retry transient failures transparently. `429` honors the
+`Retry-After: <seconds>` response header; `502 / 503 / 504` use exponential
+backoff. `400 / 401 / 403 / 404` are never retried. After the budget is spent,
+`GenAiRateLimitException::$retryAfter` carries the last server-suggested delay
+so you can re-queue work.
+
+```env
+GENAI_RETRY_MAX_ATTEMPTS=3        # total attempts including the first; 1 disables retries
+GENAI_RETRY_BACKOFF_BASE_MS=1000  # exponential backoff base (no Retry-After header)
+GENAI_RETRY_BACKOFF_MAX_MS=30000  # cap on any single sleep
+```
+
+Override per client by passing a `RetryStrategy` to the constructor — useful in
+tests, where injecting a `sleeper` closure keeps the suite fast:
+
+```php
+use Bherila\GenAiLaravel\Http\RetryStrategy;
+
+new AnthropicClient(
+    apiKey: '...',
+    retry: new RetryStrategy(maxAttempts: 1), // disable retries
+);
+```
 
 ## Listing models
 

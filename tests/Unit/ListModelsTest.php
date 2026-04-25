@@ -6,6 +6,7 @@ use Bherila\GenAiLaravel\Clients\AnthropicClient;
 use Bherila\GenAiLaravel\Clients\BedrockClient;
 use Bherila\GenAiLaravel\Clients\GeminiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
 use Bherila\GenAiLaravel\ModelInfo;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
@@ -235,7 +236,7 @@ class ListModelsTest extends TestCase
             'https://bedrock.us-east-1.amazonaws.com/foundation-models' => Http::response([], 429, ['Retry-After' => '0']),
         ]);
 
-        $this->expectException(\Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException::class);
+        $this->expectException(GenAiRateLimitException::class);
         (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
     }
 
@@ -255,7 +256,7 @@ class ListModelsTest extends TestCase
         try {
             (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
             $this->fail('Expected GenAiRateLimitException');
-        } catch (\Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException $e) {
+        } catch (GenAiRateLimitException $e) {
             $this->assertSame(42, $e->retryAfter);
             $this->assertSame(3, $callCount);
         }
