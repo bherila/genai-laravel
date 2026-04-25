@@ -110,6 +110,9 @@ class ListModelsTest extends TestCase
                     ],
                 ],
             ]),
+            'https://bedrock.us-east-1.amazonaws.com/inference-profiles' => Http::response([
+                'inferenceProfileSummaries' => [],
+            ]),
         ]);
 
         $client = new BedrockClient(apiKey: 'test', modelId: 'anthropic.claude-3-sonnet-20240229-v1:0');
@@ -123,11 +126,74 @@ class ListModelsTest extends TestCase
         $this->assertSame('Meta', $models[1]->raw['providerName']);
 
         Http::assertSent(fn (Request $req) => $req->url() === 'https://bedrock.us-east-1.amazonaws.com/foundation-models');
+        Http::assertSent(fn (Request $req) => $req->url() === 'https://bedrock.us-east-1.amazonaws.com/inference-profiles');
+    }
+
+    public function test_bedrock_list_models_includes_inference_profiles(): void
+    {
+        Http::fake([
+            'https://bedrock.us-east-1.amazonaws.com/foundation-models' => Http::response(['modelSummaries' => []]),
+            'https://bedrock.us-east-1.amazonaws.com/inference-profiles' => Http::response([
+                'inferenceProfileSummaries' => [
+                    [
+                        'inferenceProfileId' => 'us.anthropic.claude-haiku-4-20250514-v1:0',
+                        'inferenceProfileName' => 'Cross-region Anthropic Claude Haiku 4',
+                        'inferenceProfileArn' => 'arn:aws:bedrock:us-east-1::inference-profile/us.anthropic.claude-haiku-4-20250514-v1:0',
+                        'type' => 'SYSTEM_DEFINED',
+                        'status' => 'ACTIVE',
+                        'description' => 'Routes across US regions',
+                    ],
+                ],
+            ]),
+        ]);
+
+        $models = (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
+
+        $this->assertCount(1, $models);
+        $this->assertSame('us.anthropic.claude-haiku-4-20250514-v1:0', $models[0]->id);
+        $this->assertSame('Cross-region Anthropic Claude Haiku 4', $models[0]->name);
+        $this->assertSame('bedrock', $models[0]->provider);
+        $this->assertSame('Routes across US regions', $models[0]->description);
+        $this->assertSame('SYSTEM_DEFINED', $models[0]->raw['type']);
+    }
+
+    public function test_bedrock_list_models_paginates_inference_profiles(): void
+    {
+        $callCount = 0;
+        Http::fake([
+            'https://bedrock.us-east-1.amazonaws.com/foundation-models' => Http::response(['modelSummaries' => []]),
+            'https://bedrock.us-east-1.amazonaws.com/inference-profiles*' => function () use (&$callCount) {
+                $callCount++;
+                if ($callCount === 1) {
+                    return Http::response([
+                        'inferenceProfileSummaries' => [[
+                            'inferenceProfileId' => 'us.anthropic.claude-sonnet-4-6',
+                            'inferenceProfileName' => 'Profile A',
+                        ]],
+                        'nextToken' => 'page-2-token',
+                    ]);
+                }
+
+                return Http::response([
+                    'inferenceProfileSummaries' => [[
+                        'inferenceProfileId' => 'eu.anthropic.claude-sonnet-4-6',
+                        'inferenceProfileName' => 'Profile B',
+                    ]],
+                ]);
+            },
+        ]);
+
+        $models = (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
+
+        $this->assertCount(2, $models);
+        $this->assertSame('us.anthropic.claude-sonnet-4-6', $models[0]->id);
+        $this->assertSame('eu.anthropic.claude-sonnet-4-6', $models[1]->id);
+        Http::assertSent(fn (Request $req) => str_contains($req->url(), 'nextToken=page-2-token'));
     }
 
     public function test_bedrock_list_models_uses_configured_region(): void
     {
-        Http::fake(['*' => Http::response(['modelSummaries' => []])]);
+        Http::fake(['*' => Http::response(['modelSummaries' => [], 'inferenceProfileSummaries' => []])]);
 
         (new BedrockClient(apiKey: 'test', modelId: 'anything', region: 'eu-west-1'))->listModels();
 
@@ -140,6 +206,59 @@ class ListModelsTest extends TestCase
 
         $this->expectException(GenAiFatalException::class);
         (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
+    }
+
+    public function test_bedrock_list_models_retries_on_429_and_succeeds(): void
+    {
+        $callCount = 0;
+        Http::fake([
+            'https://bedrock.us-east-1.amazonaws.com/foundation-models' => function () use (&$callCount) {
+                $callCount++;
+
+                return $callCount === 1
+                    ? Http::response([], 429, ['Retry-After' => '0'])
+                    : Http::response(['modelSummaries' => [['modelId' => 'found-after-retry', 'modelName' => 'M']]]);
+            },
+            'https://bedrock.us-east-1.amazonaws.com/inference-profiles' => Http::response(['inferenceProfileSummaries' => []]),
+        ]);
+
+        $models = (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
+
+        $this->assertCount(1, $models);
+        $this->assertSame('found-after-retry', $models[0]->id);
+        $this->assertSame(2, $callCount);
+    }
+
+    public function test_bedrock_list_models_throws_after_max_retry_attempts(): void
+    {
+        Http::fake([
+            'https://bedrock.us-east-1.amazonaws.com/foundation-models' => Http::response([], 429, ['Retry-After' => '0']),
+        ]);
+
+        $this->expectException(\Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException::class);
+        (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
+    }
+
+    public function test_bedrock_list_models_exposes_retry_after_on_exception(): void
+    {
+        // First two calls (retried) use Retry-After: 0 to avoid sleeping; third exhausts budget with Retry-After: 42.
+        $callCount = 0;
+        Http::fake([
+            'https://bedrock.us-east-1.amazonaws.com/foundation-models' => function () use (&$callCount) {
+                $callCount++;
+                $header = $callCount < 3 ? '0' : '42';
+
+                return Http::response([], 429, ['Retry-After' => $header]);
+            },
+        ]);
+
+        try {
+            (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
+            $this->fail('Expected GenAiRateLimitException');
+        } catch (\Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException $e) {
+            $this->assertSame(42, $e->retryAfter);
+            $this->assertSame(3, $callCount);
+        }
     }
 
     // ── Gemini ───────────────────────────────────────────────────────────────

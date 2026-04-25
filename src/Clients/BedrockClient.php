@@ -33,6 +33,8 @@ use Illuminate\Support\Facades\Log;
  */
 class BedrockClient implements GenAiClient
 {
+    private const MAX_LIST_RETRY_ATTEMPTS = 3;
+
     private string $modelId;
 
     private string $region;
@@ -192,58 +194,105 @@ class BedrockClient implements GenAiClient
     }
 
     /**
-     * List foundation models available in this Bedrock region.
+     * List models available in this Bedrock region.
      *
-     * Hits the Bedrock *control-plane* endpoint (`bedrock.REGION.amazonaws.com`)
-     * rather than the runtime endpoint used for inference. Returns the union of
-     * all providers available through Bedrock — filter by ModelInfo::$raw['providerName']
-     * if you only want Anthropic / Meta / etc.
+     * Calls two control-plane endpoints and merges the results:
+     * - `/foundation-models`  — base models (no pagination)
+     * - `/inference-profiles` — cross-region inference profiles, e.g.
+     *   `us.anthropic.claude-haiku-4-20250514-v1:0` (paginated via nextToken)
+     *
+     * Filter by ModelInfo::$raw['providerName'] or ModelInfo::$raw['type'] to
+     * narrow to a specific provider or profile type (SYSTEM_DEFINED / APPLICATION).
      *
      * @return list<ModelInfo>
      */
     public function listModels(): array
     {
-        $url = "https://bedrock.{$this->region}.amazonaws.com/foundation-models";
-        $response = $this->http->get($url);
-
-        if (! $response->successful()) {
-            Log::error('Bedrock list foundation models failed', [
-                'status' => $response->status(),
-                'body' => $response->body(),
-            ]);
-
-            if ($response->status() === 429) {
-                throw new GenAiRateLimitException('Bedrock rate limit exceeded.');
-            }
-            if (in_array($response->status(), [400, 401, 403, 404], true)) {
-                throw new GenAiFatalException('Bedrock list models error: '.$response->body());
-            }
-            throw new GenAiException('Bedrock API error '.$response->status().': '.$response->body());
-        }
-
-        $payload = $response->json() ?? [];
+        $baseUrl = "https://bedrock.{$this->region}.amazonaws.com";
         $models = [];
-        foreach ($payload['modelSummaries'] ?? [] as $entry) {
+
+        // Foundation models — single page, no pagination.
+        $response = $this->getWithRetry("{$baseUrl}/foundation-models");
+
+        foreach ($response->json()['modelSummaries'] ?? [] as $entry) {
             $id = (string) ($entry['modelId'] ?? '');
             if ($id === '') {
                 continue;
             }
             $name = (string) ($entry['modelName'] ?? $id);
             $provider = $entry['providerName'] ?? null;
-            $description = is_string($provider) && $provider !== ''
-                ? "Provider: {$provider}"
-                : null;
-
             $models[] = new ModelInfo(
                 id: $id,
                 name: $name,
                 provider: 'bedrock',
-                description: $description,
+                description: is_string($provider) && $provider !== '' ? "Provider: {$provider}" : null,
                 raw: is_array($entry) ? $entry : [],
             );
         }
 
+        // Inference profiles — paginated; includes cross-region profiles missing from /foundation-models.
+        $nextToken = null;
+        do {
+            $params = $nextToken !== null ? ['nextToken' => $nextToken] : [];
+            $response = $this->getWithRetry("{$baseUrl}/inference-profiles", $params);
+
+            $payload = $response->json() ?? [];
+            foreach ($payload['inferenceProfileSummaries'] ?? [] as $entry) {
+                $id = (string) ($entry['inferenceProfileId'] ?? '');
+                if ($id === '') {
+                    continue;
+                }
+                $models[] = new ModelInfo(
+                    id: $id,
+                    name: (string) ($entry['inferenceProfileName'] ?? $id),
+                    provider: 'bedrock',
+                    description: isset($entry['description']) && $entry['description'] !== '' ? (string) $entry['description'] : null,
+                    raw: is_array($entry) ? $entry : [],
+                );
+            }
+            $nextToken = isset($payload['nextToken']) && is_string($payload['nextToken']) ? $payload['nextToken'] : null;
+        } while ($nextToken !== null);
+
         return $models;
+    }
+
+    /**
+     * GET with retry-on-429 for listModels control-plane calls.
+     * Honors the Retry-After header; falls back to exponential backoff (1s, 2s, 4s…).
+     *
+     * @param  array<string, mixed>  $params
+     */
+    private function getWithRetry(string $url, array $params = []): \Illuminate\Http\Client\Response
+    {
+        for ($attempt = 0; ; $attempt++) {
+            $response = $this->http->get($url, $params);
+            if ($response->successful()) {
+                return $response;
+            }
+            if ($response->status() === 429 && $attempt < self::MAX_LIST_RETRY_ATTEMPTS - 1) {
+                $header = $response->header('Retry-After');
+                sleep($header !== '' ? (int) $header : (1 << $attempt));
+                continue;
+            }
+            $this->throwListModelsError($response, ltrim((string) parse_url($url, PHP_URL_PATH), '/'));
+        }
+    }
+
+    private function throwListModelsError(\Illuminate\Http\Client\Response $response, string $endpoint): never
+    {
+        Log::error("Bedrock list {$endpoint} failed", [
+            'status' => $response->status(),
+            'body' => $response->body(),
+        ]);
+
+        if ($response->status() === 429) {
+            $header = $response->header('Retry-After');
+            throw new GenAiRateLimitException('Bedrock rate limit exceeded.', $header !== '' ? (int) $header : null);
+        }
+        if (in_array($response->status(), [400, 401, 403, 404], true)) {
+            throw new GenAiFatalException('Bedrock list models error: '.$response->body());
+        }
+        throw new GenAiException('Bedrock API error '.$response->status().': '.$response->body());
     }
 
     /**
