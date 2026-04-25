@@ -11,6 +11,19 @@ return [
     */
     'default' => env('GENAI_PROVIDER', 'gemini'),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Retry policy (applies to all providers)
+    |--------------------------------------------------------------------------
+    | Retries 429 (honoring `Retry-After`) and transient 5xx (502/503/504).
+    | `max_attempts` includes the first request; set to 1 to disable retries.
+    */
+    'retry' => [
+        'max_attempts' => (int) env('GENAI_RETRY_MAX_ATTEMPTS', 3),
+        'backoff_base_ms' => (int) env('GENAI_RETRY_BACKOFF_BASE_MS', 1000),
+        'backoff_max_ms' => (int) env('GENAI_RETRY_BACKOFF_MAX_MS', 30000),
+    ],
+
     'providers' => [
 
         /*
@@ -55,13 +68,12 @@ return [
         |--------------------------------------------------------------------------
         */
         'bedrock' => [
-            // AWS access key ID.
+            // Bearer token sent as `Authorization: Bearer {api_key}`. This package
+            // does not use AWS SigV4 — `api_key` is the bearer token itself, not
+            // an AWS access key ID.
             'api_key' => env('BEDROCK_API_KEY'),
 
-            // AWS secret access key (used as Bearer token in Bedrock's HTTP auth).
-            'secret_key' => env('BEDROCK_SECRET_KEY'),
-
-            // STS session token — required when using temporary IAM credentials.
+            // Optional STS session token, sent as X-Amz-Security-Token.
             'session_token' => env('BEDROCK_SESSION_TOKEN'),
 
             // AWS region.

@@ -4,18 +4,17 @@ namespace Bherila\GenAiLaravel\Clients;
 
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
-use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
-use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
+use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
 use Bherila\GenAiLaravel\Usage;
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 
 /**
  * Anthropic Messages API implementation of GenAiClient.
@@ -69,13 +68,16 @@ class AnthropicClient implements GenAiClient
 
     private int $maxTokens;
 
-    private \Illuminate\Http\Client\PendingRequest $http;
+    private PendingRequest $http;
+
+    private RetryStrategy $retry;
 
     public function __construct(
         string $apiKey,
         string $model = 'claude-sonnet-4-6',
         int $maxTokens = 8192,
         int $timeout = 240,
+        ?RetryStrategy $retry = null,
     ) {
         $this->model = $model;
         $this->maxTokens = $maxTokens;
@@ -84,6 +86,7 @@ class AnthropicClient implements GenAiClient
             'anthropic-version' => self::API_VERSION,
             'Content-Type' => 'application/json',
         ])->timeout($timeout);
+        $this->retry = $retry ?? RetryStrategy::fromConfig();
     }
 
     public function provider(): string
@@ -190,24 +193,10 @@ class AnthropicClient implements GenAiClient
             $payload['tool_choice'] = $native['tool_choice'];
         }
 
-        $response = $this->http->post(self::API_BASE.'/v1/messages', $payload);
-
-        if (! $response->successful()) {
-            Log::error('Anthropic API request failed', [
-                'status' => $response->status(),
-                'body' => $response->body(),
-            ]);
-
-            if ($response->status() === 429) {
-                throw new GenAiRateLimitException('Anthropic API rate limit exceeded.');
-            }
-
-            if (in_array($response->status(), [400, 403, 404], true)) {
-                throw new GenAiFatalException('Anthropic API error: '.$response->body());
-            }
-
-            throw new GenAiException('Anthropic API error '.$response->status().': '.$response->body());
-        }
+        $response = $this->retry->execute(
+            fn () => $this->http->post(self::API_BASE.'/v1/messages', $payload),
+            'Anthropic Messages',
+        );
 
         return $response->json() ?? [];
     }
@@ -270,24 +259,10 @@ class AnthropicClient implements GenAiClient
                 $query['after_id'] = $afterId;
             }
 
-            $response = $this->http->get(self::API_BASE.'/v1/models', $query);
-
-            if (! $response->successful()) {
-                Log::error('Anthropic list models failed', [
-                    'status' => $response->status(),
-                    'body' => $response->body(),
-                ]);
-
-                if ($response->status() === 429) {
-                    throw new GenAiRateLimitException('Anthropic API rate limit exceeded.');
-                }
-                if (in_array($response->status(), [400, 401, 403, 404], true)) {
-                    throw new GenAiFatalException('Anthropic API error: '.$response->body());
-                }
-                throw new GenAiException('Anthropic API error '.$response->status().': '.$response->body());
-            }
-
-            $payload = $response->json() ?? [];
+            $payload = $this->retry->execute(
+                fn () => $this->http->get(self::API_BASE.'/v1/models', $query),
+                'Anthropic list models',
+            )->json() ?? [];
             foreach ($payload['data'] ?? [] as $entry) {
                 $id = (string) ($entry['id'] ?? '');
                 if ($id === '') {

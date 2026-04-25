@@ -4,16 +4,15 @@ namespace Bherila\GenAiLaravel\Clients;
 
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
-use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
-use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
 use Bherila\GenAiLaravel\Usage;
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 
 /**
  * AWS Bedrock Converse API implementation of GenAiClient.
@@ -24,16 +23,20 @@ use Illuminate\Support\Facades\Log;
  * ToolConfig is translated to Bedrock toolSpec + toolChoice format.
  * ContentBlock objects are converted to Bedrock content block format.
  *
+ * Auth: this package uses Bearer-token auth (`Authorization: Bearer {api_key}`),
+ * not AWS Signature V4. `api_key` is the bearer token itself — not an AWS access
+ * key ID. Temporary credentials may add an STS session token.
+ *
  * Config keys (all under genai.providers.bedrock):
- *   api_key        — AWS access key ID
- *   secret_key     — AWS secret access key (passed as Bearer token)
- *   session_token  — optional STS session token
- *   region         — e.g. "us-east-1" (default: "us-east-1")
+ *   api_key        — Bearer token used for the Authorization header
+ *   session_token  — optional; sent as X-Amz-Security-Token header
+ *   region         — AWS region, e.g. "us-east-1" (default: "us-east-1")
  *   model          — model ID, e.g. "us.anthropic.claude-haiku-4-20250514-v1:0"
  */
 class BedrockClient implements GenAiClient
 {
-    private const MAX_LIST_RETRY_ATTEMPTS = 3;
+    /** Hard ceiling on `/inference-profiles` pages — defense in depth. */
+    private const MAX_INFERENCE_PROFILE_PAGES = 50;
 
     private string $modelId;
 
@@ -41,13 +44,16 @@ class BedrockClient implements GenAiClient
 
     private string $endpoint;
 
-    private \Illuminate\Http\Client\PendingRequest $http;
+    private PendingRequest $http;
+
+    private RetryStrategy $retry;
 
     public function __construct(
         string $apiKey,
         string $modelId,
         string $region = 'us-east-1',
         string $sessionToken = '',
+        ?RetryStrategy $retry = null,
     ) {
         $this->modelId = $modelId;
         $this->region = $region;
@@ -59,6 +65,7 @@ class BedrockClient implements GenAiClient
         }
 
         $this->http = Http::withToken($apiKey)->withHeaders($headers);
+        $this->retry = $retry ?? RetryStrategy::fromConfig();
     }
 
     public function provider(): string
@@ -128,25 +135,10 @@ class BedrockClient implements GenAiClient
             $payload['toolConfig'] = $this->toolConfigToBedrock($toolConfig);
         }
 
-        $response = $this->http
-            ->post("{$this->endpoint}/model/{$this->modelId}/converse", $payload);
-
-        if (! $response->successful()) {
-            Log::error('Bedrock Converse failed', [
-                'status' => $response->status(),
-                'body' => $response->body(),
-            ]);
-
-            if ($response->status() === 429) {
-                throw new GenAiRateLimitException('Bedrock rate limit exceeded.');
-            }
-
-            if ($response->status() === 400) {
-                throw new GenAiFatalException('Bedrock bad request: '.$response->body());
-            }
-
-            throw new GenAiException('Bedrock API error '.$response->status().': '.$response->body());
-        }
+        $response = $this->retry->execute(
+            fn () => $this->http->post("{$this->endpoint}/model/{$this->modelId}/converse", $payload),
+            'Bedrock Converse',
+        );
 
         return $response->json() ?? [];
     }
@@ -212,18 +204,20 @@ class BedrockClient implements GenAiClient
         $models = [];
 
         // Foundation models — single page, no pagination.
-        $response = $this->getWithRetry("{$baseUrl}/foundation-models");
+        $payload = $this->retry->execute(
+            fn () => $this->http->get("{$baseUrl}/foundation-models"),
+            'Bedrock list foundation-models',
+        )->json() ?? [];
 
-        foreach ($response->json()['modelSummaries'] ?? [] as $entry) {
+        foreach ($payload['modelSummaries'] ?? [] as $entry) {
             $id = (string) ($entry['modelId'] ?? '');
             if ($id === '') {
                 continue;
             }
-            $name = (string) ($entry['modelName'] ?? $id);
             $provider = $entry['providerName'] ?? null;
             $models[] = new ModelInfo(
                 id: $id,
-                name: $name,
+                name: (string) ($entry['modelName'] ?? $id),
                 provider: 'bedrock',
                 description: is_string($provider) && $provider !== '' ? "Provider: {$provider}" : null,
                 raw: is_array($entry) ? $entry : [],
@@ -232,11 +226,14 @@ class BedrockClient implements GenAiClient
 
         // Inference profiles — paginated; includes cross-region profiles missing from /foundation-models.
         $nextToken = null;
+        $page = 0;
         do {
             $params = $nextToken !== null ? ['nextToken' => $nextToken] : [];
-            $response = $this->getWithRetry("{$baseUrl}/inference-profiles", $params);
+            $payload = $this->retry->execute(
+                fn () => $this->http->get("{$baseUrl}/inference-profiles", $params),
+                'Bedrock list inference-profiles',
+            )->json() ?? [];
 
-            $payload = $response->json() ?? [];
             foreach ($payload['inferenceProfileSummaries'] ?? [] as $entry) {
                 $id = (string) ($entry['inferenceProfileId'] ?? '');
                 if ($id === '') {
@@ -251,48 +248,10 @@ class BedrockClient implements GenAiClient
                 );
             }
             $nextToken = isset($payload['nextToken']) && is_string($payload['nextToken']) ? $payload['nextToken'] : null;
-        } while ($nextToken !== null);
+            $page++;
+        } while ($nextToken !== null && $page < self::MAX_INFERENCE_PROFILE_PAGES);
 
         return $models;
-    }
-
-    /**
-     * GET with retry-on-429 for listModels control-plane calls.
-     * Honors the Retry-After header; falls back to exponential backoff (1s, 2s, 4s…).
-     *
-     * @param  array<string, mixed>  $params
-     */
-    private function getWithRetry(string $url, array $params = []): \Illuminate\Http\Client\Response
-    {
-        for ($attempt = 0; ; $attempt++) {
-            $response = $this->http->get($url, $params);
-            if ($response->successful()) {
-                return $response;
-            }
-            if ($response->status() === 429 && $attempt < self::MAX_LIST_RETRY_ATTEMPTS - 1) {
-                $header = $response->header('Retry-After');
-                sleep($header !== '' ? (int) $header : (1 << $attempt));
-                continue;
-            }
-            $this->throwListModelsError($response, ltrim((string) parse_url($url, PHP_URL_PATH), '/'));
-        }
-    }
-
-    private function throwListModelsError(\Illuminate\Http\Client\Response $response, string $endpoint): never
-    {
-        Log::error("Bedrock list {$endpoint} failed", [
-            'status' => $response->status(),
-            'body' => $response->body(),
-        ]);
-
-        if ($response->status() === 429) {
-            $header = $response->header('Retry-After');
-            throw new GenAiRateLimitException('Bedrock rate limit exceeded.', $header !== '' ? (int) $header : null);
-        }
-        if (in_array($response->status(), [400, 401, 403, 404], true)) {
-            throw new GenAiFatalException('Bedrock list models error: '.$response->body());
-        }
-        throw new GenAiException('Bedrock API error '.$response->status().': '.$response->body());
     }
 
     /**

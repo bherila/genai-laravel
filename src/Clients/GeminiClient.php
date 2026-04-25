@@ -4,11 +4,10 @@ namespace Bherila\GenAiLaravel\Clients;
 
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
-use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
-use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
+use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -44,11 +43,14 @@ class GeminiClient implements GenAiClient
 
     private int $timeout;
 
-    public function __construct(string $apiKey, string $model = 'gemini-2.0-flash', int $timeout = 240)
+    private RetryStrategy $retry;
+
+    public function __construct(string $apiKey, string $model = 'gemini-2.0-flash', int $timeout = 240, ?RetryStrategy $retry = null)
     {
         $this->apiKey = $apiKey;
         $this->model = $model;
         $this->timeout = $timeout;
+        $this->retry = $retry ?? RetryStrategy::fromConfig();
     }
 
     public function provider(): string
@@ -292,26 +294,12 @@ class GeminiClient implements GenAiClient
                 $query['pageToken'] = $pageToken;
             }
 
-            $response = Http::withHeaders(['x-goog-api-key' => $this->apiKey])
-                ->withOptions(['timeout' => $this->timeout])
-                ->get(self::BASE_URL.'/v1beta/models', $query);
-
-            if (! $response->successful()) {
-                Log::error('Gemini list models failed', [
-                    'status' => $response->status(),
-                    'body' => $response->body(),
-                ]);
-
-                if ($response->status() === 429) {
-                    throw new GenAiRateLimitException('Gemini rate limit exceeded.');
-                }
-                if (in_array($response->status(), [400, 401, 403, 404], true)) {
-                    throw new GenAiFatalException('Gemini list models error: '.$response->body());
-                }
-                throw new GenAiException('Gemini API error '.$response->status().': '.$response->body());
-            }
-
-            $payload = $response->json() ?? [];
+            $payload = $this->retry->execute(
+                fn () => Http::withHeaders(['x-goog-api-key' => $this->apiKey])
+                    ->withOptions(['timeout' => $this->timeout])
+                    ->get(self::BASE_URL.'/v1beta/models', $query),
+                'Gemini list models',
+            )->json() ?? [];
             foreach ($payload['models'] ?? [] as $entry) {
                 $id = (string) ($entry['name'] ?? '');
                 if ($id === '') {
@@ -560,27 +548,13 @@ class GeminiClient implements GenAiClient
     {
         $url = self::BASE_URL."/v1beta/models/{$this->model}:generateContent";
 
-        $response = Http::withHeaders([
-            'x-goog-api-key' => $this->apiKey,
-            'Content-Type' => 'application/json',
-        ])->withOptions(['timeout' => $this->timeout])->post($url, $payload);
-
-        if (! $response->successful()) {
-            Log::error('Gemini generateContent failed', [
-                'status' => $response->status(),
-                'body' => $response->body(),
-            ]);
-
-            if ($response->status() === 429) {
-                throw new GenAiRateLimitException('Gemini rate limit exceeded.');
-            }
-
-            if ($response->status() === 400) {
-                throw new GenAiFatalException('Gemini bad request: '.$response->body());
-            }
-
-            throw new GenAiException('Gemini API error '.$response->status().': '.$response->body());
-        }
+        $response = $this->retry->execute(
+            fn () => Http::withHeaders([
+                'x-goog-api-key' => $this->apiKey,
+                'Content-Type' => 'application/json',
+            ])->withOptions(['timeout' => $this->timeout])->post($url, $payload),
+            'Gemini generateContent',
+        );
 
         return $response->json() ?? [];
     }
