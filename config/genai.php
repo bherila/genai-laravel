@@ -24,6 +24,31 @@ return [
         'backoff_max_ms' => (int) env('GENAI_RETRY_BACKOFF_MAX_MS', 30000),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Pricing table (USD per million tokens)
+    |--------------------------------------------------------------------------
+    | No provider catalog API returns pricing, so listModels() always leaves
+    | cost fields null. Populate this table to let PricingBook::fromConfig()
+    | enrich ModelInfo entries and compute costs from Usage.
+    |
+    | Shape: pricing.<provider>.<modelId> => [
+    |     'input' => 3.0, 'output' => 15.0,
+    |     'cache_read' => 0.3, 'cache_creation' => 3.75, // optional
+    | ]
+    */
+    'pricing' => [
+        // 'anthropic' => [
+        //     'claude-sonnet-4-6' => ['input' => 3.0, 'output' => 15.0],
+        // ],
+        // 'bedrock' => [
+        //     'us.anthropic.claude-haiku-4-20250514-v1:0' => ['input' => 0.8, 'output' => 4.0],
+        // ],
+        // 'gemini' => [
+        //     'gemini-2.0-flash' => ['input' => 0.1, 'output' => 0.4],
+        // ],
+    ],
+
     'providers' => [
 
         /*
