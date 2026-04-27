@@ -274,10 +274,21 @@ class GeminiClient implements GenAiClient
         return $calls;
     }
 
+    public function checkCredentials(): bool
+    {
+        $response = Http::withHeaders(['x-goog-api-key' => $this->apiKey])
+            ->withOptions(['timeout' => $this->timeout])
+            ->get(self::BASE_URL.'/v1beta/models', ['pageSize' => 1]);
+        if ($response->successful()) {
+            return true;
+        }
+        if (in_array($response->status(), [401, 403], true)) {
+            return false;
+        }
+        throw new GenAiFatalException('checkCredentials error '.$response->status().': '.$response->body());
+    }
+
     /**
-     * List models available to this Gemini API key.
-     *
-     * Paginates via `pageToken` until the API stops returning one. The response
      * filters out models that don't support `generateContent` — those can't be
      * called through this package so including them would be misleading.
      *

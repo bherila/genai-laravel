@@ -94,6 +94,16 @@ interface GenAiClient
     public function extractToolCalls(array $response): array;
 
     /**
+     * Verify that the configured credentials are accepted by the provider.
+     *
+     * Makes the cheapest available read-only API call (a model-list endpoint)
+     * and returns true when the provider accepts the credentials, or false when
+     * the provider returns 401/403. Any other error (network failure, 5xx, etc.)
+     * is re-thrown so callers can distinguish "bad key" from "service down".
+     */
+    public function checkCredentials(): bool;
+
+    /**
      * List models available to this provider's credentials.
      *
      * Results are normalised into ModelInfo — provider-specific fields remain
