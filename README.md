@@ -393,6 +393,7 @@ formats), so no conversion runs for Bedrock requests.
 | File size limit | 20 MB | 4.5 MB | 4.5 MB |
 | System prompts | ✅ | ✅ | ✅ |
 | `listModels()` | ✅ | ✅ (control-plane) | ✅ |
+| `checkCredentials()` | ✅ | ✅ | ✅ |
 | Pricing in catalog | ❌ | ❌ | ❌ |
 | Image blocks (PNG/JPEG/GIF/WebP) | ✅ | ✅ | ✅ |
 | Office-format documents | auto-convert 📄📊 | ✅ native | auto-convert 📄📊 |
