@@ -240,9 +240,19 @@ class AnthropicClient implements GenAiClient
         return $calls;
     }
 
+    public function checkCredentials(): bool
+    {
+        $response = $this->http->get(self::API_BASE.'/v1/models', ['limit' => 1]);
+        if ($response->successful()) {
+            return true;
+        }
+        if (in_array($response->status(), [401, 403], true)) {
+            return false;
+        }
+        throw new GenAiFatalException('checkCredentials error '.$response->status().': '.$response->body());
+    }
+
     /**
-     * List models available to this Anthropic API key.
-     *
      * Paginates via the `after_id` cursor until `has_more` is false.
      * Anthropic does not return pricing in this endpoint — cost fields are null.
      *

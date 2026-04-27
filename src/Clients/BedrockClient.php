@@ -185,14 +185,19 @@ class BedrockClient implements GenAiClient
         return $calls;
     }
 
+    public function checkCredentials(): bool
+    {
+        $response = $this->http->get("https://bedrock.{$this->region}.amazonaws.com/foundation-models");
+        if ($response->successful()) {
+            return true;
+        }
+        if (in_array($response->status(), [401, 403], true)) {
+            return false;
+        }
+        throw new GenAiFatalException('checkCredentials error '.$response->status().': '.$response->body());
+    }
+
     /**
-     * List models available in this Bedrock region.
-     *
-     * Calls two control-plane endpoints and merges the results:
-     * - `/foundation-models`  — base models (no pagination)
-     * - `/inference-profiles` — cross-region inference profiles, e.g.
-     *   `us.anthropic.claude-haiku-4-20250514-v1:0` (paginated via nextToken)
-     *
      * Filter by ModelInfo::$raw['providerName'] or ModelInfo::$raw['type'] to
      * narrow to a specific provider or profile type (SYSTEM_DEFINED / APPLICATION).
      *
