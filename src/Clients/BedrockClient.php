@@ -256,6 +256,14 @@ class BedrockClient implements GenAiClient
             $page++;
         } while ($nextToken !== null && $page < self::MAX_INFERENCE_PROFILE_PAGES);
 
+        if ($nextToken !== null) {
+            throw new GenAiFatalException(
+                'Bedrock inference-profile pagination reached the configured page cap of '
+                . self::MAX_INFERENCE_PROFILE_PAGES
+                . ' before all pages were retrieved; model list may be incomplete.'
+            );
+        }
+
         return $models;
     }
 
