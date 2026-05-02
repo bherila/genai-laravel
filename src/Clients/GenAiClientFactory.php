@@ -16,7 +16,7 @@ use Bherila\GenAiLaravel\Exceptions\GenAiException;
 class GenAiClientFactory
 {
     /**
-     * @throws GenAiException  When the provider is unknown or misconfigured.
+     * @throws GenAiException When the provider is unknown or misconfigured.
      */
     public static function make(?string $provider = null): GenAiClient
     {
@@ -60,6 +60,7 @@ class GenAiClientFactory
             modelId: $cfg['model'] ?? 'us.anthropic.claude-haiku-4-20250514-v1:0',
             region: $cfg['region'] ?? 'us-east-1',
             sessionToken: $cfg['session_token'] ?? '',
+            timeout: (int) ($cfg['timeout'] ?? 240),
         );
     }
 

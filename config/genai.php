@@ -106,6 +106,9 @@ return [
 
             // Bedrock model ID or inference profile ARN.
             'model' => env('BEDROCK_MODEL', 'us.anthropic.claude-haiku-4-20250514-v1:0'),
+
+            // HTTP timeout in seconds for long-running inference calls.
+            'timeout' => (int) env('BEDROCK_TIMEOUT', 240),
         ],
 
     ],

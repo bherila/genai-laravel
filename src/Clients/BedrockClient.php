@@ -32,6 +32,7 @@ use Illuminate\Support\Facades\Http;
  *   session_token  — optional; sent as X-Amz-Security-Token header
  *   region         — AWS region, e.g. "us-east-1" (default: "us-east-1")
  *   model          — model ID, e.g. "us.anthropic.claude-haiku-4-20250514-v1:0"
+ *   timeout        — HTTP timeout in seconds (default: 240)
  */
 class BedrockClient implements GenAiClient
 {
@@ -54,6 +55,7 @@ class BedrockClient implements GenAiClient
         string $region = 'us-east-1',
         string $sessionToken = '',
         ?RetryStrategy $retry = null,
+        int $timeout = 240,
     ) {
         $this->modelId = $modelId;
         $this->region = $region;
@@ -64,7 +66,7 @@ class BedrockClient implements GenAiClient
             $headers['X-Amz-Security-Token'] = $sessionToken;
         }
 
-        $this->http = Http::withToken($apiKey)->withHeaders($headers);
+        $this->http = Http::withToken($apiKey)->withHeaders($headers)->timeout($timeout);
         $this->retry = $retry ?? RetryStrategy::fromConfig();
     }
 
@@ -259,8 +261,8 @@ class BedrockClient implements GenAiClient
         if ($nextToken !== null) {
             throw new GenAiFatalException(
                 'Bedrock inference-profile pagination reached the configured page cap of '
-                . self::MAX_INFERENCE_PROFILE_PAGES
-                . ' before all pages were retrieved; model list may be incomplete.'
+                .self::MAX_INFERENCE_PROFILE_PAGES
+                .' before all pages were retrieved; model list may be incomplete.'
             );
         }
 
