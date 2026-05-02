@@ -32,9 +32,44 @@ class BedrockClientTest extends TestCase
         $this->assertSame('bedrock', $this->makeClient()->provider());
     }
 
+    public function test_default_http_timeout_supports_long_running_inference(): void
+    {
+        $this->assertSame(240, $this->pendingRequestOptions($this->makeClient())['timeout'] ?? null);
+    }
+
+    public function test_custom_http_timeout_can_be_configured(): void
+    {
+        $client = new BedrockClient(
+            apiKey: 'test-key',
+            modelId: 'us.anthropic.claude-haiku-4-20250514-v1:0',
+            region: 'us-east-1',
+            timeout: 360,
+        );
+
+        $this->assertSame(360, $this->pendingRequestOptions($client)['timeout'] ?? null);
+    }
+
     public function test_max_file_bytes_is_4_5_mb(): void
     {
         $this->assertSame(4_718_592, BedrockClient::maxFileBytes());
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function pendingRequestOptions(BedrockClient $client): array
+    {
+        $clientReflection = new \ReflectionClass($client);
+        $httpProperty = $clientReflection->getProperty('http');
+        $httpProperty->setAccessible(true);
+        $pendingRequest = $httpProperty->getValue($client);
+
+        $requestReflection = new \ReflectionClass($pendingRequest);
+        $optionsProperty = $requestReflection->getProperty('options');
+        $optionsProperty->setAccessible(true);
+
+        /** @var array<string, mixed> */
+        return $optionsProperty->getValue($pendingRequest);
     }
 
     // ── upload / delete (no-ops) ─────────────────────────────────────────────

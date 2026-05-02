@@ -26,10 +26,11 @@ class GenAiClientFactoryTest extends TestCase
 
     public function test_makes_bedrock_client_when_default_is_bedrock(): void
     {
-        config(['genai.default' => 'bedrock', 'genai.providers.bedrock.api_key' => 'test-key', 'genai.providers.bedrock.model' => 'model-id']);
+        config(['genai.default' => 'bedrock', 'genai.providers.bedrock.api_key' => 'test-key', 'genai.providers.bedrock.model' => 'model-id', 'genai.providers.bedrock.timeout' => 360]);
         $client = GenAiClientFactory::make();
         $this->assertInstanceOf(BedrockClient::class, $client);
         $this->assertSame('bedrock', $client->provider());
+        $this->assertSame(360, $this->pendingRequestOptions($client)['timeout'] ?? null);
     }
 
     public function test_explicit_provider_overrides_default(): void
@@ -60,5 +61,23 @@ class GenAiClientFactoryTest extends TestCase
         $this->expectException(GenAiException::class);
         $this->expectExceptionMessageMatches('/api_key is not set/');
         GenAiClientFactory::make('bedrock');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function pendingRequestOptions(BedrockClient $client): array
+    {
+        $clientReflection = new \ReflectionClass($client);
+        $httpProperty = $clientReflection->getProperty('http');
+        $httpProperty->setAccessible(true);
+        $pendingRequest = $httpProperty->getValue($client);
+
+        $requestReflection = new \ReflectionClass($pendingRequest);
+        $optionsProperty = $requestReflection->getProperty('options');
+        $optionsProperty->setAccessible(true);
+
+        /** @var array<string, mixed> */
+        return $optionsProperty->getValue($pendingRequest);
     }
 }
