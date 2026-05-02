@@ -192,6 +192,20 @@ class GeminiClientTest extends TestCase
         });
     }
 
+    public function test_converse_with_file_ref_can_omit_response_mime_type(): void
+    {
+        Http::fake(['*generateContent*' => Http::response($this->emptyResponse())]);
+
+        $client = new GeminiClient(
+            apiKey: 'test-api-key',
+            responseMimeType: null,
+        );
+
+        $client->converseWithFileRef('files/abc', 'application/pdf', 'prompt');
+
+        Http::assertSent(fn (Request $req) => ! array_key_exists('generationConfig', $req->data()));
+    }
+
     // ── converseWithInlineFile ────────────────────────────────────────────────
 
     public function test_converse_with_inline_file_embeds_base64(): void

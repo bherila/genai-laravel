@@ -66,6 +66,10 @@ return [
 
             // HTTP timeout in seconds for long-running inference calls.
             'timeout' => (int) env('GEMINI_TIMEOUT', 240),
+
+            // Generation response MIME type. Set to an empty string to let the
+            // prompt choose a non-JSON text format such as TOON.
+            'response_mime_type' => env('GEMINI_RESPONSE_MIME_TYPE', 'application/json'),
         ],
 
         /*

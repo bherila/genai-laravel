@@ -43,6 +43,7 @@ class GenAiClientFactory
             apiKey: $apiKey,
             model: $cfg['model'] ?? 'gemini-2.0-flash',
             timeout: (int) ($cfg['timeout'] ?? 240),
+            responseMimeType: static::nullableStringConfig($cfg['response_mime_type'] ?? 'application/json'),
         );
     }
 
@@ -79,5 +80,10 @@ class GenAiClientFactory
             maxTokens: (int) ($cfg['max_tokens'] ?? 8192),
             timeout: (int) ($cfg['timeout'] ?? 240),
         );
+    }
+
+    private static function nullableStringConfig(mixed $value): ?string
+    {
+        return is_string($value) && $value !== '' ? $value : null;
     }
 }

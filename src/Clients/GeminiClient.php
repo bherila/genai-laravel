@@ -30,6 +30,7 @@ use Illuminate\Support\Facades\Log;
  *   api_key  — required; may be per-user or site-wide
  *   model    — e.g. "gemini-2.0-flash" (default: "gemini-2.0-flash")
  *   timeout  — HTTP timeout in seconds (default: 240)
+ *   response_mime_type — optional generation response MIME type; null disables MIME forcing
  */
 class GeminiClient implements GenAiClient
 {
@@ -43,13 +44,21 @@ class GeminiClient implements GenAiClient
 
     private int $timeout;
 
+    private ?string $responseMimeType;
+
     private RetryStrategy $retry;
 
-    public function __construct(string $apiKey, string $model = 'gemini-2.0-flash', int $timeout = 240, ?RetryStrategy $retry = null)
-    {
+    public function __construct(
+        string $apiKey,
+        string $model = 'gemini-2.0-flash',
+        int $timeout = 240,
+        ?RetryStrategy $retry = null,
+        ?string $responseMimeType = 'application/json',
+    ) {
         $this->apiKey = $apiKey;
         $this->model = $model;
         $this->timeout = $timeout;
+        $this->responseMimeType = $responseMimeType !== '' ? $responseMimeType : null;
         $this->retry = $retry ?? RetryStrategy::fromConfig();
     }
 
@@ -464,7 +473,7 @@ class GeminiClient implements GenAiClient
     }
 
     /**
-     * Merge toolConfig into the payload, or fall back to JSON-mode generation.
+     * Merge toolConfig into the payload, or apply the configured response MIME type.
      */
     private function applyToolConfig(array $payload, ?ToolConfig $toolConfig): array
     {
@@ -472,7 +481,9 @@ class GeminiClient implements GenAiClient
             return array_merge($payload, $this->toolConfigToGemini($toolConfig));
         }
 
-        $payload['generationConfig'] = ['response_mime_type' => 'application/json'];
+        if ($this->responseMimeType !== null) {
+            $payload['generationConfig'] = ['response_mime_type' => $this->responseMimeType];
+        }
 
         return $payload;
     }
