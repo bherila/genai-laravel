@@ -117,4 +117,24 @@ return [
 
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Instrumentation
+    |--------------------------------------------------------------------------
+    |
+    | Sentry instrumentation is optional and activates only when the Sentry PHP
+    | SDK is installed and tracing is enabled for the current transaction.
+    | Prompt/response capture is disabled by default because those values often
+    | contain user or customer data.
+    |
+    */
+    'instrumentation' => [
+        'sentry' => [
+            'enabled' => env('GENAI_SENTRY_INSTRUMENTATION_ENABLED', true),
+            'agent_name' => env('GENAI_AGENT_NAME', env('APP_NAME', 'laravel')),
+            'conversation_id' => env('GENAI_CONVERSATION_ID'),
+            'record_content' => env('GENAI_SENTRY_RECORD_CONTENT', false),
+        ],
+    ],
+
 ];
