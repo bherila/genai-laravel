@@ -1,105 +1,117 @@
 <?php
 
-namespace Bherila\GenAiLaravel\Tests\Unit;
-
-use Bherila\GenAiLaravel\ContentBlock;
-use Bherila\GenAiLaravel\Contracts\GenAiClient;
-use Bherila\GenAiLaravel\GenAiRequest;
-use Bherila\GenAiLaravel\ModelInfo;
-use Bherila\GenAiLaravel\ToolConfig;
-use Bherila\GenAiLaravel\Usage;
-use PHPUnit\Framework\TestCase;
-
-class GenAiRequestInstrumentationTest extends TestCase
-{
-    public function test_generate_runs_without_sentry_sdk_installed(): void
+namespace Sentry {
+    function trace(callable $callback, mixed $context): array
     {
-        $client = new class implements GenAiClient
+        throw new \RuntimeException('Unsupported Sentry trace API should not be called.');
+    }
+}
+
+namespace Sentry\Tracing {
+    class SpanContext {}
+}
+
+namespace Bherila\GenAiLaravel\Tests\Unit {
+
+    use Bherila\GenAiLaravel\ContentBlock;
+    use Bherila\GenAiLaravel\Contracts\GenAiClient;
+    use Bherila\GenAiLaravel\GenAiRequest;
+    use Bherila\GenAiLaravel\ModelInfo;
+    use Bherila\GenAiLaravel\ToolConfig;
+    use Bherila\GenAiLaravel\Usage;
+    use PHPUnit\Framework\TestCase;
+
+    class GenAiRequestInstrumentationTest extends TestCase
+    {
+        public function test_generate_runs_with_unsupported_sentry_sdk_api(): void
         {
-            public array $messages = [];
-
-            public function provider(): string
+            $client = new class implements GenAiClient
             {
-                return 'test';
-            }
+                public array $messages = [];
 
-            public function model(): string
-            {
-                return 'test-model';
-            }
+                public function provider(): string
+                {
+                    return 'test';
+                }
 
-            public static function maxFileBytes(): int
-            {
-                return 1024;
-            }
+                public function model(): string
+                {
+                    return 'test-model';
+                }
 
-            public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array
-            {
-                $this->messages = $messages;
+                public static function maxFileBytes(): int
+                {
+                    return 1024;
+                }
 
-                return [
-                    'text' => 'ok',
-                    'usage' => [
-                        'input' => 10,
-                        'output' => 4,
-                    ],
-                ];
-            }
+                public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array
+                {
+                    $this->messages = $messages;
 
-            public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
-            {
-                return null;
-            }
+                    return [
+                        'text' => 'ok',
+                        'usage' => [
+                            'input' => 10,
+                            'output' => 4,
+                        ],
+                    ];
+                }
 
-            public function deleteFile(string $fileRef): void {}
+                public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
+                {
+                    return null;
+                }
 
-            public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
-            {
-                return [];
-            }
+                public function deleteFile(string $fileRef): void {}
 
-            public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, string $system = '', ?ToolConfig $toolConfig = null): array
-            {
-                return [];
-            }
+                public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
+                {
+                    return [];
+                }
 
-            public function extractText(array $response): string
-            {
-                return (string) ($response['text'] ?? '');
-            }
+                public function converseWithInlineFile(string $fileBytes, string $mimeType, string $prompt, string $system = '', ?ToolConfig $toolConfig = null): array
+                {
+                    return [];
+                }
 
-            public function extractToolCalls(array $response): array
-            {
-                return [];
-            }
+                public function extractText(array $response): string
+                {
+                    return (string) ($response['text'] ?? '');
+                }
 
-            public function checkCredentials(): bool
-            {
-                return true;
-            }
+                public function extractToolCalls(array $response): array
+                {
+                    return [];
+                }
 
-            public function listModels(): array
-            {
-                return [new ModelInfo('test-model', 'Test Model', 'test')];
-            }
+                public function checkCredentials(): bool
+                {
+                    return true;
+                }
 
-            public function extractUsage(array $response): Usage
-            {
-                $usage = $response['usage'] ?? [];
+                public function listModels(): array
+                {
+                    return [new ModelInfo('test-model', 'Test Model', 'test')];
+                }
 
-                return new Usage(
-                    inputTokens: (int) ($usage['input'] ?? 0),
-                    outputTokens: (int) ($usage['output'] ?? 0),
-                    totalTokens: (int) ($usage['input'] ?? 0) + (int) ($usage['output'] ?? 0),
-                );
-            }
-        };
+                public function extractUsage(array $response): Usage
+                {
+                    $usage = $response['usage'] ?? [];
 
-        $response = GenAiRequest::with($client)->prompt('hello')->generate();
+                    return new Usage(
+                        inputTokens: (int) ($usage['input'] ?? 0),
+                        outputTokens: (int) ($usage['output'] ?? 0),
+                        totalTokens: (int) ($usage['input'] ?? 0) + (int) ($usage['output'] ?? 0),
+                    );
+                }
+            };
 
-        $this->assertSame('ok', $response->text);
-        $this->assertSame(10, $response->usage->inputTokens);
-        $this->assertSame('hello', $client->messages[0]['content'][0]->text);
-        $this->assertInstanceOf(ContentBlock::class, $client->messages[0]['content'][0]);
+            $response = GenAiRequest::with($client)->prompt('hello')->generate();
+
+            $this->assertSame('ok', $response->text);
+            $this->assertSame(10, $response->usage->inputTokens);
+            $this->assertSame('hello', $client->messages[0]['content'][0]->text);
+            $this->assertInstanceOf(ContentBlock::class, $client->messages[0]['content'][0]);
+        }
     }
 }

@@ -54,7 +54,8 @@ final class SentryGenAiTracer
     {
         return self::configBool('genai.instrumentation.sentry.enabled', true)
             && function_exists('\Sentry\trace')
-            && class_exists('\Sentry\Tracing\SpanContext');
+            && class_exists('\Sentry\Tracing\SpanContext')
+            && method_exists(SpanContext::class, 'make');
     }
 
     /** @return array<string, string> */
