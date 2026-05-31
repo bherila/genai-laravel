@@ -3,6 +3,7 @@
 namespace Bherila\GenAiLaravel;
 
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
+use Bherila\GenAiLaravel\Instrumentation\SentryGenAiTracer;
 
 /**
  * Fluent builder for provider-agnostic AI requests.
@@ -38,7 +39,7 @@ final class GenAiRequest
      */
     public static function with(GenAiClient $client): static
     {
-        return new static($client);
+        return new self($client);
     }
 
     /**
@@ -119,7 +120,13 @@ final class GenAiRequest
     public function generate(): GenAiResponse
     {
         $messages = $this->rawMessages ?? $this->buildMessages();
-        $raw = $this->client->converse($this->system, $messages, $this->toolConfig);
+        $raw = SentryGenAiTracer::trace(
+            client: $this->client,
+            inputMessages: $messages,
+            system: $this->system,
+            toolConfig: $this->toolConfig,
+            callback: fn () => $this->client->converse($this->system, $messages, $this->toolConfig),
+        );
 
         return new GenAiResponse(
             text: $this->client->extractText($raw),
