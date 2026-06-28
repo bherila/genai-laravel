@@ -18,11 +18,12 @@
     },
     "require-dev": {
         "dompdf/dompdf": "^3",
+        "laravel/pint": "^1",
         "orchestra/testbench": "^10|^11",
         "phpoffice/phpspreadsheet": "^4|^5",
         "phpoffice/phpword": "^1",
-        "phpunit/phpunit": "^10|^11",
-        "laravel/pint": "^1"
+        "phpstan/phpstan": "^2",
+        "phpunit/phpunit": "^10|^11"
     },
     "suggest": {
         "dompdf/dompdf": "Required together with phpoffice/phpword to render DOC / DOCX / ODT / RTF to PDF before sending — preserves formatting and lets providers use their native PDF pipelines (Gemini vision, Anthropic document blocks). Not loaded if absent.",
@@ -51,7 +52,8 @@
         }
     },
     "scripts": {
-        "test": "phpunit"
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=512M"
     },
     "config": {
         "sort-packages": true

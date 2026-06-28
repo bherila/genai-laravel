@@ -1,0 +1,217 @@
+parameters:
+	ignoreErrors:
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\AnthropicClient\:\:contentBlockToAnthropic\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/AnthropicClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\AnthropicClient\:\:convertMessages\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/AnthropicClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\AnthropicClient\:\:toolConfigToAnthropic\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/AnthropicClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\BedrockClient\:\:contentBlockToBedrock\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/BedrockClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\BedrockClient\:\:convertMessages\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/BedrockClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\BedrockClient\:\:toolConfigToBedrock\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/BedrockClient.php
+
+		-
+			message: '#^Match expression does not handle remaining value\: string$#'
+			identifier: match.unhandled
+			count: 1
+			path: src/Clients/GeminiClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\GeminiClient\:\:applyToolConfig\(\) has parameter \$payload with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/GeminiClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\GeminiClient\:\:applyToolConfig\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/GeminiClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\GeminiClient\:\:contentBlockToGeminiPart\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/GeminiClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\GeminiClient\:\:schemaToGemini\(\) has parameter \$jsonSchema with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/GeminiClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\GeminiClient\:\:schemaToGemini\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/GeminiClient.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Clients\\GeminiClient\:\:toolConfigToGemini\(\) return type has no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Clients/GeminiClient.php
+
+		-
+			message: '#^PHPDoc tag @throws with type Bherila\\GenAiLaravel\\Clients\\GenAiException\|Bherila\\GenAiLaravel\\Clients\\GenAiRateLimitException\|Bherila\\GenAiLaravel\\Exceptions\\GenAiFatalException is not subtype of Throwable$#'
+			identifier: throws.notThrowable
+			count: 1
+			path: src/Clients/GeminiClient.php
+
+		-
+			message: '#^Unsafe call to private method Bherila\\GenAiLaravel\\Clients\\GenAiClientFactory\:\:makeAnthropic\(\) through static\:\:\.$#'
+			identifier: staticClassAccess.privateMethod
+			count: 1
+			path: src/Clients/GenAiClientFactory.php
+
+		-
+			message: '#^Unsafe call to private method Bherila\\GenAiLaravel\\Clients\\GenAiClientFactory\:\:makeBedrock\(\) through static\:\:\.$#'
+			identifier: staticClassAccess.privateMethod
+			count: 1
+			path: src/Clients/GenAiClientFactory.php
+
+		-
+			message: '#^Unsafe call to private method Bherila\\GenAiLaravel\\Clients\\GenAiClientFactory\:\:makeGemini\(\) through static\:\:\.$#'
+			identifier: staticClassAccess.privateMethod
+			count: 1
+			path: src/Clients/GenAiClientFactory.php
+
+		-
+			message: '#^Unsafe call to private method Bherila\\GenAiLaravel\\Clients\\GenAiClientFactory\:\:nullableStringConfig\(\) through static\:\:\.$#'
+			identifier: staticClassAccess.privateMethod
+			count: 1
+			path: src/Clients/GenAiClientFactory.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method converse\(\) parameter \#1 \$system with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method converse\(\) parameter \#2 \$messages with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method converse\(\) parameter \#3 \$toolConfig with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method converse\(\) return type with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method converseWithFileRef\(\) parameter \#4 \$toolConfig with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method converseWithFileRef\(\) return type with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method converseWithInlineFile\(\) parameter \#4 \$system with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method converseWithInlineFile\(\) parameter \#5 \$toolConfig with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method converseWithInlineFile\(\) return type with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method extractText\(\) parameter \#1 \$response with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method extractToolCalls\(\) parameter \#1 \$response with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Bherila\\GenAiLaravel\\Facades\\GenAi has PHPDoc tag @method for method extractToolCalls\(\) return type with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Facades/GenAi.php
+
+		-
+			message: '#^Class Mpdf\\Mpdf not found\.$#'
+			identifier: class.notFound
+			count: 1
+			path: src/FileConversion/WordDocumentToPdf.php
+
+		-
+			message: '#^Class TCPDF not found\.$#'
+			identifier: class.notFound
+			count: 1
+			path: src/FileConversion/WordDocumentToPdf.php
+
+		-
+			message: '#^Call to function method_exists\(\) with ''Sentry\\\\Tracing\\\\SpanContext'' and ''make'' will always evaluate to false\.$#'
+			identifier: function.impossibleType
+			count: 1
+			path: src/Instrumentation/SentryGenAiTracer.php
+
+		-
+			message: '#^Call to static method make\(\) on an unknown class Sentry\\Tracing\\SpanContext\.$#'
+			identifier: class.notFound
+			count: 1
+			path: src/Instrumentation/SentryGenAiTracer.php
+
+		-
+			message: '#^Function Sentry\\trace not found\.$#'
+			identifier: function.notFound
+			count: 1
+			path: src/Instrumentation/SentryGenAiTracer.php
+
+		-
+			message: '#^Method Bherila\\GenAiLaravel\\Instrumentation\\SentryGenAiTracer\:\:responseSpanData\(\) has parameter \$response with no value type specified in iterable type array\.$#'
+			identifier: missingType.iterableValue
+			count: 1
+			path: src/Instrumentation/SentryGenAiTracer.php

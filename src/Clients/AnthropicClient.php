@@ -413,7 +413,7 @@ class AnthropicClient implements GenAiClient
         $tools = array_map(fn (ToolDefinition $t) => [
             'name' => $t->name,
             'description' => $t->description,
-            'input_schema' => $t->inputSchema->toArray(),
+            'input_schema' => $t->inputSchema->jsonSerialize(),
         ], $config->tools);
 
         $toolChoice = match ($config->choice->type) {

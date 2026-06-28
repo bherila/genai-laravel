@@ -542,10 +542,12 @@ class GeminiClient implements GenAiClient
         }
 
         if ($rawType === 'object' && isset($jsonSchema['properties'])) {
-            $result['properties'] = array_map(
+            $properties = array_map(
                 fn ($prop) => $this->schemaToGemini($prop),
                 $jsonSchema['properties'],
             );
+            // Encode an empty property map as a JSON object, not `[]`.
+            $result['properties'] = $properties === [] ? (object) [] : $properties;
             if (! empty($jsonSchema['required'])) {
                 $result['required'] = $jsonSchema['required'];
             }

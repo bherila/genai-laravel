@@ -351,7 +351,7 @@ class BedrockClient implements GenAiClient
             'toolSpec' => [
                 'name' => $t->name,
                 'description' => $t->description,
-                'inputSchema' => ['json' => $t->inputSchema->toArray()],
+                'inputSchema' => ['json' => $t->inputSchema->jsonSerialize()],
             ],
         ], $config->tools);
 
