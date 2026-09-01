@@ -75,7 +75,7 @@ jobs:
         run: composer install --prefer-dist --no-interaction
 
       - name: Code style (Pint)
-        run: vendor/bin/pint --test
+        run: vendor/bin/pint --test -v
 
       - name: Security advisories (composer audit)
         run: composer audit --locked
