@@ -5,8 +5,11 @@ namespace Bherila\GenAiLaravel\Clients;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
+use Bherila\GenAiLaravel\FileLimits;
 use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
@@ -85,21 +88,48 @@ class GeminiClient implements GenAiClient
     }
 
     /**
-     * Gemini File API limit: 2 GB per file.
-     * In practice, keep documents under 20 MB for reliable extraction.
+     * Inline content shares the 20 MB total request budget, and base64 inflates
+     * bytes by a third — so the decoded ceiling is 15 MB regardless of MIME type.
+     * Anything larger belongs in the File API.
+     * https://ai.google.dev/gemini-api/docs/document-processing
      */
-    public static function maxFileBytes(): int
+    public static function maxInlineFileBytes(string $mimeType): int
     {
-        return 20 * 1024 * 1024; // 20 MB practical limit
+        return intdiv(20 * 1024 * 1024 * 3, 4); // 15 MB decoded
+    }
+
+    /** Gemini File API limit: 2 GB per file. */
+    public static function maxUploadedFileBytes(): ?int
+    {
+        return 2 * 1024 * 1024 * 1024;
+    }
+
+    /** Gemini documents no per-message file-count cap. */
+    public static function maxFilesPerMessage(): ?int
+    {
+        return null;
+    }
+
+    public static function supportsFileApi(): bool
+    {
+        return true;
     }
 
     /**
      * Upload a file to the Gemini File API.
      *
      * @param  resource|string  $fileContent
+     *
+     * @throws GenAiFileTooLargeException When the file exceeds the 2 GB File API limit.
+     * @throws GenAiUploadException When Gemini rejects or fails the upload.
      */
-    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
+    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): string
     {
+        $size = FileLimits::contentLength($fileContent);
+        if ($size !== null) {
+            FileLimits::assertWithin($size, (int) self::maxUploadedFileBytes(), 'Gemini File API', 'the uploaded file');
+        }
+
         $name = $displayName !== '' ? $displayName : 'genai-upload-'.time();
 
         $response = Http::withHeaders(['x-goog-api-key' => $this->apiKey])
@@ -115,14 +145,23 @@ class GeminiClient implements GenAiClient
                 'body' => $response->body(),
             ]);
 
-            if ($response->status() === 400) {
-                throw new GenAiFatalException('File rejected by Gemini: '.$response->body());
-            }
-
-            return null;
+            throw new GenAiUploadException(
+                'Gemini File API upload failed with HTTP '.$response->status().': '.$response->body(),
+                status: $response->status(),
+                body: $response->body(),
+            );
         }
 
-        return $response->json('file.uri') ?? $response->json('file.name');
+        $ref = $response->json('file.uri') ?? $response->json('file.name');
+        if (! is_string($ref) || $ref === '') {
+            throw new GenAiUploadException(
+                'Gemini File API upload succeeded but returned no file URI or name.',
+                status: $response->status(),
+                body: $response->body(),
+            );
+        }
+
+        return $ref;
     }
 
     /**
@@ -177,6 +216,7 @@ class GeminiClient implements GenAiClient
         ) {
             // Word doc → PDF: preserves formatting for Gemini's vision pipeline.
             $pdfB64 = WordDocumentToPdf::convert($fileBytes, $mimeType);
+            $this->assertInlineSizeWithinLimit($pdfB64, 'application/pdf');
             $parts = [
                 ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]],
                 ['text' => $prompt],
@@ -190,6 +230,7 @@ class GeminiClient implements GenAiClient
             $parts = [['text' => $extracted], ['text' => $prompt]];
         } else {
             $this->assertSupportedDocumentMimeType($mimeType);
+            $this->assertInlineSizeWithinLimit($fileBytes, $mimeType);
             $parts = [
                 ['inline_data' => ['mime_type' => $mimeType, 'data' => $fileBytes]],
                 ['text' => $prompt],
@@ -441,6 +482,19 @@ class GeminiClient implements GenAiClient
         return in_array($mimeType, self::SUPPORTED_DOCUMENT_MIME_TYPES, true);
     }
 
+    /**
+     * @throws GenAiFileTooLargeException
+     */
+    private function assertInlineSizeWithinLimit(string $base64, string $mimeType): void
+    {
+        FileLimits::assertWithin(
+            FileLimits::decodedLength($base64),
+            self::maxInlineFileBytes($mimeType),
+            'Gemini generateContent',
+            sprintf('inline %s content', $mimeType === '' ? 'file' : $mimeType),
+        );
+    }
+
     private function assertSupportedDocumentMimeType(string $mimeType): void
     {
         if (self::isSupportedDocumentMimeType($mimeType)) {
@@ -471,6 +525,7 @@ class GeminiClient implements GenAiClient
                 && WordDocumentToPdf::isAvailable()
             ) {
                 $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime);
+                $this->assertInlineSizeWithinLimit($pdfB64, 'application/pdf');
 
                 return ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]];
             }
@@ -483,6 +538,7 @@ class GeminiClient implements GenAiClient
             }
 
             $this->assertSupportedDocumentMimeType($mime);
+            $this->assertInlineSizeWithinLimit((string) $block->base64, $mime);
 
             return ['inline_data' => ['mime_type' => $mime, 'data' => $block->base64]];
         }

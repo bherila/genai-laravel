@@ -5,7 +5,9 @@ namespace Bherila\GenAiLaravel\Tests\Unit;
 use Bherila\GenAiLaravel\Clients\GeminiClient;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
 use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -28,9 +30,37 @@ class GeminiClientTest extends TestCase
         $this->assertSame('gemini', $this->makeClient()->provider());
     }
 
-    public function test_max_file_bytes_is_20_mb(): void
+    public function test_inline_limit_is_the_request_budget_less_base64_overhead(): void
     {
-        $this->assertSame(20 * 1024 * 1024, GeminiClient::maxFileBytes());
+        $this->assertSame(intdiv(20 * 1024 * 1024 * 3, 4), GeminiClient::maxInlineFileBytes('application/pdf'));
+    }
+
+    public function test_uploaded_file_limit_is_the_file_api_ceiling(): void
+    {
+        $this->assertSame(2 * 1024 * 1024 * 1024, GeminiClient::maxUploadedFileBytes());
+        $this->assertTrue(GeminiClient::supportsFileApi());
+    }
+
+    public function test_no_documented_per_message_file_cap(): void
+    {
+        $this->assertNull(GeminiClient::maxFilesPerMessage());
+    }
+
+    public function test_oversized_inline_file_is_rejected_before_the_request(): void
+    {
+        Http::fake(['*' => Http::response(['candidates' => []])]);
+
+        // Built as base64 directly: encoding a real 15 MB payload would hold two
+        // copies of it in memory for no extra coverage.
+        $oversized = str_repeat('A', 4 * (int) ceil((GeminiClient::maxInlineFileBytes('application/pdf') + 1) / 3));
+
+        $this->expectException(GenAiFileTooLargeException::class);
+
+        try {
+            $this->makeClient()->converseWithInlineFile($oversized, 'application/pdf', 'Summarize.');
+        } finally {
+            Http::assertNothingSent();
+        }
     }
 
     // ── uploadFile ───────────────────────────────────────────────────────────
@@ -55,20 +85,33 @@ class GeminiClientTest extends TestCase
         $this->assertSame('files/fallback456', $uri);
     }
 
-    public function test_upload_file_returns_null_on_server_error(): void
+    public function test_upload_file_throws_upload_exception_on_server_error(): void
     {
         Http::fake(['*upload*' => Http::response(['error' => 'internal'], 500)]);
 
-        $result = $this->makeClient()->uploadFile('bytes', 'application/pdf');
-        $this->assertNull($result);
+        try {
+            $this->makeClient()->uploadFile('bytes', 'application/pdf');
+            $this->fail('Expected GenAiUploadException.');
+        } catch (GenAiUploadException $e) {
+            // A failed upload and an unsupported one used to be indistinguishable
+            // — both returned null. They are now separate types.
+            $this->assertSame(500, $e->status);
+        }
     }
 
-    public function test_upload_file_throws_fatal_on_400(): void
+    public function test_upload_file_throws_upload_exception_on_400(): void
     {
         Http::fake(['*upload*' => Http::response(['error' => 'bad file'], 400)]);
 
-        $this->expectException(GenAiFatalException::class);
-        $this->expectExceptionMessageMatches('/File rejected by Gemini/');
+        $this->expectException(GenAiUploadException::class);
+        $this->makeClient()->uploadFile('bytes', 'application/pdf');
+    }
+
+    public function test_upload_file_throws_when_the_response_carries_no_reference(): void
+    {
+        Http::fake(['*upload*' => Http::response(['file' => []], 200)]);
+
+        $this->expectException(GenAiUploadException::class);
         $this->makeClient()->uploadFile('bytes', 'application/pdf');
     }
 

@@ -15,6 +15,7 @@ namespace Bherila\GenAiLaravel\Tests\Unit {
 
     use Bherila\GenAiLaravel\ContentBlock;
     use Bherila\GenAiLaravel\Contracts\GenAiClient;
+    use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
     use Bherila\GenAiLaravel\GenAiRequest;
     use Bherila\GenAiLaravel\ModelInfo;
     use Bherila\GenAiLaravel\ToolConfig;
@@ -39,9 +40,24 @@ namespace Bherila\GenAiLaravel\Tests\Unit {
                     return 'test-model';
                 }
 
-                public static function maxFileBytes(): int
+                public static function maxInlineFileBytes(string $mimeType): int
                 {
                     return 1024;
+                }
+
+                public static function maxUploadedFileBytes(): ?int
+                {
+                    return null;
+                }
+
+                public static function maxFilesPerMessage(): ?int
+                {
+                    return null;
+                }
+
+                public static function supportsFileApi(): bool
+                {
+                    return false;
                 }
 
                 public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array
@@ -57,9 +73,9 @@ namespace Bherila\GenAiLaravel\Tests\Unit {
                     ];
                 }
 
-                public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
+                public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): string
                 {
-                    return null;
+                    throw new GenAiUnsupportedOperationException('no File API in this stub');
                 }
 
                 public function deleteFile(string $fileRef): void {}

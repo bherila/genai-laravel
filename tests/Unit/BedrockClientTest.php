@@ -5,7 +5,9 @@ namespace Bherila\GenAiLaravel\Tests\Unit;
 use Bherila\GenAiLaravel\Clients\BedrockClient;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
 use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -49,9 +51,25 @@ class BedrockClientTest extends TestCase
         $this->assertSame(360, $this->pendingRequestOptions($client)['timeout'] ?? null);
     }
 
-    public function test_max_file_bytes_is_4_5_mb(): void
+    public function test_inline_document_limit_is_4_5_mb(): void
     {
-        $this->assertSame(4_718_592, BedrockClient::maxFileBytes());
+        $this->assertSame(4_718_592, BedrockClient::maxInlineFileBytes('application/pdf'));
+    }
+
+    public function test_inline_image_limit_is_3_75_mb(): void
+    {
+        $this->assertSame(3_932_160, BedrockClient::maxInlineFileBytes('image/png'));
+    }
+
+    public function test_has_no_uploaded_file_limit_because_there_is_no_file_api(): void
+    {
+        $this->assertNull(BedrockClient::maxUploadedFileBytes());
+        $this->assertFalse(BedrockClient::supportsFileApi());
+    }
+
+    public function test_documents_per_message_are_capped_at_five(): void
+    {
+        $this->assertSame(5, BedrockClient::maxFilesPerMessage());
     }
 
     /**
@@ -72,11 +90,12 @@ class BedrockClientTest extends TestCase
         return $optionsProperty->getValue($pendingRequest);
     }
 
-    // ── upload / delete (no-ops) ─────────────────────────────────────────────
+    // ── file API (unsupported) ───────────────────────────────────────────────
 
-    public function test_upload_file_returns_null(): void
+    public function test_upload_file_throws_unsupported_operation(): void
     {
-        $this->assertNull($this->makeClient()->uploadFile('bytes', 'application/pdf'));
+        $this->expectException(GenAiUnsupportedOperationException::class);
+        $this->makeClient()->uploadFile('bytes', 'application/pdf');
     }
 
     public function test_delete_file_is_noop(): void
@@ -85,10 +104,56 @@ class BedrockClientTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
-    public function test_converse_with_file_ref_throws_logic_exception(): void
+    public function test_converse_with_file_ref_throws_unsupported_operation(): void
     {
-        $this->expectException(\LogicException::class);
+        $this->expectException(GenAiUnsupportedOperationException::class);
         $this->makeClient()->converseWithFileRef('files/abc', 'application/pdf', 'test');
+    }
+
+    // ── size and count limits ────────────────────────────────────────────────
+
+    public function test_oversized_inline_document_is_rejected_before_the_request(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $oversized = str_repeat('A', 4 * (int) ceil((BedrockClient::maxInlineFileBytes('application/pdf') + 1) / 3));
+
+        try {
+            $this->makeClient()->converseWithInlineFile($oversized, 'application/pdf', 'Summarize.');
+            $this->fail('Expected GenAiFileTooLargeException.');
+        } catch (GenAiFileTooLargeException $e) {
+            $this->assertSame(4_718_592, $e->limitBytes);
+            $this->assertGreaterThan($e->limitBytes, $e->actualBytes);
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_more_than_five_documents_in_one_message_is_rejected(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $content = [];
+        for ($i = 0; $i < 6; $i++) {
+            $content[] = ContentBlock::document(base64_encode('pdf'), 'application/pdf');
+        }
+
+        $this->expectException(GenAiFatalException::class);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => $content]]);
+    }
+
+    public function test_five_documents_in_one_message_is_allowed(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $content = [];
+        for ($i = 0; $i < 5; $i++) {
+            $content[] = ContentBlock::document(base64_encode('pdf'), 'application/pdf');
+        }
+
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => $content]]);
+
+        Http::assertSentCount(1);
     }
 
     // ── converse ─────────────────────────────────────────────────────────────

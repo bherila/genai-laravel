@@ -5,8 +5,11 @@ namespace Bherila\GenAiLaravel\Clients;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
+use Bherila\GenAiLaravel\FileLimits;
 use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
@@ -20,7 +23,7 @@ use Illuminate\Support\Facades\Http;
  * Anthropic Messages API implementation of GenAiClient.
  *
  * Uses the direct Anthropic API (api.anthropic.com), not AWS Bedrock.
- * Files must be embedded as base64 inline content blocks — uploadFile() returns null.
+ * Files must be embedded as base64 inline content blocks — supportsFileApi() is false.
  *
  * ToolConfig is translated to Anthropic tools + tool_choice format.
  * ContentBlock objects are converted to Anthropic content block format.
@@ -100,12 +103,31 @@ class AnthropicClient implements GenAiClient
     }
 
     /**
-     * Anthropic API limit per base64 document block.
-     * https://docs.anthropic.com/en/docs/build-with-claude/files
+     * Vision caps a single image at 5 MB. Documents have no separate per-file
+     * allowance — they are bounded by the 32 MB Messages API request limit, and
+     * base64 inflates bytes by a third, so 24 MB decoded is the usable ceiling.
+     * https://platform.claude.com/docs/en/build-with-claude/pdf-support
      */
-    public static function maxFileBytes(): int
+    public static function maxInlineFileBytes(string $mimeType): int
     {
-        return 4_718_592; // 4.5 MB
+        return self::isSupportedImageMimeType($mimeType)
+            ? 5 * 1024 * 1024
+            : intdiv(32 * 1024 * 1024 * 3, 4);
+    }
+
+    /**
+     * Files API limit per uploaded file.
+     * https://platform.claude.com/docs/en/build-with-claude/files
+     */
+    public static function maxUploadedFileBytes(): ?int
+    {
+        return 500 * 1024 * 1024;
+    }
+
+    /** Anthropic documents no per-message file-count cap. */
+    public static function maxFilesPerMessage(): ?int
+    {
+        return null;
     }
 
     /**
@@ -141,19 +163,30 @@ class AnthropicClient implements GenAiClient
         return in_array($mimeType, self::SUPPORTED_IMAGE_MIME_TYPES, true);
     }
 
-    /** Anthropic direct API has no persistent File API — always returns null. */
-    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
+    public static function supportsFileApi(): bool
     {
-        return null;
+        return false;
     }
 
-    /** No-op: Anthropic direct API does not store uploaded files. */
+    /** @throws GenAiUnsupportedOperationException */
+    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): string
+    {
+        throw new GenAiUnsupportedOperationException(
+            'This client does not implement the Anthropic Files API yet. Send the bytes '
+            .'inline with converseWithInlineFile() or ContentBlock::document().'
+        );
+    }
+
+    /** No-op: this client does not store uploaded files. */
     public function deleteFile(string $fileRef): void {}
 
-    /** @throws \LogicException */
+    /** @throws GenAiUnsupportedOperationException */
     public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
     {
-        throw new \LogicException('Anthropic direct API does not support file references. Use converseWithInlineFile() with base64-encoded bytes.');
+        throw new GenAiUnsupportedOperationException(
+            'This client does not implement the Anthropic Files API yet. Use converseWithInlineFile() '
+            .'with base64-encoded bytes.'
+        );
     }
 
     /**
@@ -358,6 +391,8 @@ class AnthropicClient implements GenAiClient
                     );
                 }
 
+                $this->assertInlineSizeWithinLimit((string) $block->base64, $mime);
+
                 return [
                     'type' => 'document',
                     'source' => [
@@ -369,6 +404,8 @@ class AnthropicClient implements GenAiClient
             }
 
             if (self::isSupportedDocumentMimeType($mime)) {
+                $this->assertInlineSizeWithinLimit((string) $block->base64, $mime);
+
                 return [
                     'type' => 'document',
                     'source' => [
@@ -381,6 +418,8 @@ class AnthropicClient implements GenAiClient
 
             // Images go through the `image` block shape, not `document`.
             if (self::isSupportedImageMimeType($mime)) {
+                $this->assertInlineSizeWithinLimit((string) $block->base64, $mime);
+
                 return [
                     'type' => 'image',
                     'source' => [
@@ -396,6 +435,7 @@ class AnthropicClient implements GenAiClient
             // phpoffice/phpword plus a PDF renderer (dompdf / mpdf / tcpdf).
             if (WordDocumentToPdf::supports($mime) && WordDocumentToPdf::isAvailable()) {
                 $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime);
+                $this->assertInlineSizeWithinLimit($pdfB64, 'application/pdf');
 
                 return [
                     'type' => 'document',
@@ -429,6 +469,19 @@ class AnthropicClient implements GenAiClient
         }
 
         return ['type' => 'text', 'text' => $block->text ?? ''];
+    }
+
+    /**
+     * @throws GenAiFileTooLargeException
+     */
+    private function assertInlineSizeWithinLimit(string $base64, string $mimeType): void
+    {
+        FileLimits::assertWithin(
+            FileLimits::decodedLength($base64),
+            self::maxInlineFileBytes($mimeType),
+            'Anthropic Messages',
+            sprintf('inline %s content', $mimeType === '' ? 'file' : $mimeType),
+        );
     }
 
     private function toolConfigToAnthropic(ToolConfig $config): array

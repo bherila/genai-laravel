@@ -3,6 +3,9 @@
 namespace Bherila\GenAiLaravel\Contracts;
 
 use Bherila\GenAiLaravel\ContentBlock;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\Usage;
@@ -31,9 +34,30 @@ interface GenAiClient
     public function model(): string;
 
     /**
-     * Hard limit in bytes for a single file/document block this provider accepts.
+     * Maximum decoded size, in bytes, of one file sent inline (base64) in a message.
+     *
+     * The limit is MIME-dependent: providers cap images far lower than documents,
+     * and the ceiling for inline content is the *request* budget rather than any
+     * per-file allowance, so base64 expansion is already accounted for. Clients
+     * enforce this themselves before a request leaves the process — a file over
+     * the limit raises GenAiFileTooLargeException rather than a provider 400.
      */
-    public static function maxFileBytes(): int;
+    public static function maxInlineFileBytes(string $mimeType): int;
+
+    /**
+     * Maximum decoded size, in bytes, of one file sent through the provider's
+     * File API, or null when the provider has no File API.
+     *
+     * This is typically orders of magnitude larger than the inline limit, which is
+     * the whole reason to upload rather than inline.
+     */
+    public static function maxUploadedFileBytes(): ?int;
+
+    /**
+     * Maximum number of document blocks accepted in a single message, or null when
+     * the provider documents no such cap.
+     */
+    public static function maxFilesPerMessage(): ?int;
 
     /**
      * Send a conversation turn and return the raw provider response.
@@ -46,26 +70,36 @@ interface GenAiClient
     public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array;
 
     /**
-     * Upload a file to the provider's File API and return a reference URI/ID.
+     * Whether this provider exposes a File API that uploadFile() can use.
      *
-     * Returns null when the provider does not support a separate file upload step.
-     *
-     * @param  resource|string  $fileContent
-     * @return string|null  Provider file URI/ID, or null when unsupported.
+     * Callers that want to degrade gracefully should branch on this rather than
+     * catching GenAiUnsupportedOperationException.
      */
-    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string;
+    public static function supportsFileApi(): bool;
 
     /**
-     * Delete a previously uploaded file. No-op when unsupported.
+     * Upload a file to the provider's File API and return a reference URI/ID.
+     *
+     * @param  resource|string  $fileContent
+     * @return string  Provider file URI/ID.
+     *
+     * @throws GenAiUnsupportedOperationException When the provider has no File API.
+     * @throws GenAiUploadException When the provider rejected or failed the upload.
+     * @throws GenAiFileTooLargeException When the file exceeds maxUploadedFileBytes().
+     */
+    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): string;
+
+    /**
+     * Delete a previously uploaded file. No-op for providers without a File API.
      */
     public function deleteFile(string $fileRef): void;
 
     /**
      * Send a request referencing an already-uploaded file.
      *
-     * Throws LogicException for providers without a File API (Bedrock, Anthropic).
-     *
      * @return array<string, mixed>
+     *
+     * @throws GenAiUnsupportedOperationException When the provider has no File API.
      */
     public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array;
 

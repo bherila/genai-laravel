@@ -6,6 +6,7 @@ use Bherila\GenAiLaravel\Clients\AnthropicClient;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
 use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -44,16 +45,35 @@ class AnthropicClientTest extends TestCase
         $this->assertSame('anthropic', $this->makeClient()->provider());
     }
 
-    public function test_max_file_bytes_is_4_5_mb(): void
+    public function test_inline_limit_is_the_request_budget_for_documents(): void
     {
-        $this->assertSame(4_718_592, AnthropicClient::maxFileBytes());
+        // 32 MB request limit, less the third base64 adds.
+        $this->assertSame(intdiv(32 * 1024 * 1024 * 3, 4), AnthropicClient::maxInlineFileBytes('application/pdf'));
     }
 
-    // ── upload / delete (no-ops) ─────────────────────────────────────────────
-
-    public function test_upload_file_returns_null(): void
+    public function test_inline_limit_is_lower_for_images(): void
     {
-        $this->assertNull($this->makeClient()->uploadFile('bytes', 'application/pdf'));
+        $this->assertSame(5 * 1024 * 1024, AnthropicClient::maxInlineFileBytes('image/png'));
+    }
+
+    public function test_uploaded_file_limit_is_the_files_api_ceiling(): void
+    {
+        $this->assertSame(500 * 1024 * 1024, AnthropicClient::maxUploadedFileBytes());
+    }
+
+    public function test_no_documented_per_message_file_cap(): void
+    {
+        $this->assertNull(AnthropicClient::maxFilesPerMessage());
+    }
+
+    // ── file API ─────────────────────────────────────────────────────────────
+
+    public function test_upload_file_reports_the_capability_as_unsupported(): void
+    {
+        $this->assertFalse(AnthropicClient::supportsFileApi());
+
+        $this->expectException(GenAiUnsupportedOperationException::class);
+        $this->makeClient()->uploadFile('bytes', 'application/pdf');
     }
 
     public function test_delete_file_is_noop(): void
@@ -62,9 +82,9 @@ class AnthropicClientTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
-    public function test_converse_with_file_ref_throws_logic_exception(): void
+    public function test_converse_with_file_ref_throws_unsupported_operation(): void
     {
-        $this->expectException(\LogicException::class);
+        $this->expectException(GenAiUnsupportedOperationException::class);
         $this->makeClient()->converseWithFileRef('files/abc', 'application/pdf', 'test');
     }
 

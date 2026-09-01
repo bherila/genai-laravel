@@ -5,6 +5,8 @@ namespace Bherila\GenAiLaravel\Clients;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
+use Bherila\GenAiLaravel\FileLimits;
 use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
@@ -18,7 +20,8 @@ use Illuminate\Support\Facades\Http;
  * AWS Bedrock Converse API implementation of GenAiClient.
  *
  * Bedrock does not have a separate File API — files must be embedded as base64
- * inline document blocks. uploadFile() returns null and deleteFile() is a no-op.
+ * inline document blocks. uploadFile() throws GenAiUnsupportedOperationException
+ * (supportsFileApi() returns false) and deleteFile() is a no-op.
  *
  * ToolConfig is translated to Bedrock toolSpec + toolChoice format.
  * ContentBlock objects are converted to Bedrock content block format.
@@ -81,27 +84,51 @@ class BedrockClient implements GenAiClient
     }
 
     /**
-     * Bedrock Converse API hard limit per document block.
+     * Bedrock Converse limits documents and images separately.
      * https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference-supported-models-features.html
      */
-    public static function maxFileBytes(): int
+    public static function maxInlineFileBytes(string $mimeType): int
     {
-        return 4_718_592; // 4.5 MB
+        return isset(self::MIME_TO_IMAGE_FORMAT[$mimeType])
+            ? 3_932_160  // 3.75 MB per image block
+            : 4_718_592; // 4.5 MB per document block
     }
 
-    /** Bedrock has no File API — always returns null. */
-    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
+    /** Bedrock has no File API, so there is no uploaded-file limit. */
+    public static function maxUploadedFileBytes(): ?int
     {
         return null;
+    }
+
+    /** Converse accepts at most five document blocks in one message. */
+    public static function maxFilesPerMessage(): ?int
+    {
+        return 5;
+    }
+
+    public static function supportsFileApi(): bool
+    {
+        return false;
+    }
+
+    /** @throws GenAiUnsupportedOperationException Bedrock has no File API. */
+    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): string
+    {
+        throw new GenAiUnsupportedOperationException(
+            'Bedrock has no File API. Send the bytes inline with converseWithInlineFile() '
+            .'or ContentBlock::document(), or use a provider where supportsFileApi() is true.'
+        );
     }
 
     /** No-op: Bedrock does not store uploaded files. */
     public function deleteFile(string $fileRef): void {}
 
-    /** @throws \LogicException */
+    /** @throws GenAiUnsupportedOperationException Bedrock has no File API. */
     public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
     {
-        throw new \LogicException('Bedrock does not support file references. Use converseWithInlineFile() with base64-encoded bytes.');
+        throw new GenAiUnsupportedOperationException(
+            'Bedrock does not support file references. Use converseWithInlineFile() with base64-encoded bytes.'
+        );
     }
 
     /**
@@ -313,6 +340,8 @@ class BedrockClient implements GenAiClient
     private function convertMessages(array $messages): array
     {
         return array_map(function (array $msg) {
+            $this->assertDocumentCountWithinLimit($msg['content']);
+
             return [
                 'role' => $msg['role'],
                 'content' => array_map(
@@ -323,10 +352,40 @@ class BedrockClient implements GenAiClient
         }, $messages);
     }
 
+    /**
+     * Images are capped separately by the API and are not counted here.
+     *
+     * @param  list<ContentBlock>  $content
+     */
+    private function assertDocumentCountWithinLimit(array $content): void
+    {
+        $limit = self::maxFilesPerMessage();
+        if ($limit === null) {
+            return;
+        }
+
+        $documents = 0;
+        foreach ($content as $block) {
+            if ($block->type === 'document' && ! isset(self::MIME_TO_IMAGE_FORMAT[(string) $block->mimeType])) {
+                $documents++;
+            }
+        }
+
+        if ($documents > $limit) {
+            throw new GenAiFatalException(sprintf(
+                'Bedrock Converse accepts at most %d document blocks per message; this message has %d. '
+                .'Split the documents across turns or merge them before sending.',
+                $limit,
+                $documents,
+            ));
+        }
+    }
+
     private function contentBlockToBedrock(ContentBlock $block): array
     {
         if ($block->type === 'document') {
             $mime = (string) ($block->mimeType ?? '');
+            $this->assertInlineSizeWithinLimit((string) $block->base64, $mime);
 
             if (isset(self::MIME_TO_IMAGE_FORMAT[$mime])) {
                 return [
@@ -347,6 +406,16 @@ class BedrockClient implements GenAiClient
         }
 
         return ['text' => $block->text ?? ''];
+    }
+
+    private function assertInlineSizeWithinLimit(string $base64, string $mimeType): void
+    {
+        FileLimits::assertWithin(
+            FileLimits::decodedLength($base64),
+            self::maxInlineFileBytes($mimeType),
+            'Bedrock Converse',
+            sprintf('inline %s content', $mimeType === '' ? 'file' : $mimeType),
+        );
     }
 
     private function toolConfigToBedrock(ToolConfig $config): array

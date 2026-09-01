@@ -3,6 +3,8 @@
 namespace Bherila\GenAiLaravel\FileConversion;
 
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\FileLimits;
 use PhpOffice\PhpWord\IOFactory;
 use PhpOffice\PhpWord\Settings;
 
@@ -77,8 +79,10 @@ final class WordDocumentToPdf
      * Returned value is ready to drop into a `document` content block with
      * mime_type `application/pdf`.
      */
-    public static function convert(string $base64, string $mimeType): string
+    public static function convert(string $base64, string $mimeType, ?ConversionLimits $limits = null): string
     {
+        $limits ??= new ConversionLimits;
+
         if (! class_exists(IOFactory::class)) {
             throw new GenAiFatalException(
                 'WordDocumentToPdf requires phpoffice/phpword. Install with: '
@@ -105,6 +109,22 @@ final class WordDocumentToPdf
         $bytes = base64_decode($base64, true);
         if ($bytes === false) {
             throw new GenAiFatalException('WordDocumentToPdf: input is not valid base64.');
+        }
+
+        // DOCX and ODT are ZIP containers: a small upload can unpack into an
+        // arbitrarily large document tree, so bound the input before PhpWord
+        // ever opens it.
+        if (strlen($bytes) > $limits->maxInputBytes) {
+            throw new GenAiFileTooLargeException(
+                sprintf(
+                    'WordDocumentToPdf: document is %s, above the %s conversion limit. '
+                    .'Raise ConversionLimits::$maxInputBytes if this file is trusted.',
+                    FileLimits::humanBytes(strlen($bytes)),
+                    FileLimits::humanBytes($limits->maxInputBytes),
+                ),
+                actualBytes: strlen($bytes),
+                limitBytes: $limits->maxInputBytes,
+            );
         }
 
         $readerName = self::readerNameForMime($mimeType);
@@ -158,6 +178,18 @@ final class WordDocumentToPdf
             $pdfBytes = file_get_contents($outputTmp);
             if ($pdfBytes === false || $pdfBytes === '') {
                 throw new GenAiFatalException('WordDocumentToPdf: renderer produced an empty PDF.');
+            }
+
+            if (strlen($pdfBytes) > $limits->maxOutputBytes) {
+                throw new GenAiFileTooLargeException(
+                    sprintf(
+                        'WordDocumentToPdf: rendered PDF is %s, above the %s conversion limit.',
+                        FileLimits::humanBytes(strlen($pdfBytes)),
+                        FileLimits::humanBytes($limits->maxOutputBytes),
+                    ),
+                    actualBytes: strlen($pdfBytes),
+                    limitBytes: $limits->maxOutputBytes,
+                );
             }
 
             return base64_encode($pdfBytes);

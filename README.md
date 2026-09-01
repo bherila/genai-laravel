@@ -393,6 +393,38 @@ back to a clear `GenAiFatalException` telling the caller what to install.
 - 📊 Spreadsheet → text requires `phpoffice/phpspreadsheet`. Install with
   `composer require phpoffice/phpspreadsheet`.
 
+### Size limits
+
+The limits differ by capability, not just by provider, so they are exposed as
+three separate questions rather than one number:
+
+```php
+$client::maxInlineFileBytes('application/pdf'); // decoded bytes for one inline block
+$client::maxUploadedFileBytes();                // decoded bytes via the File API, null when there is none
+$client::maxFilesPerMessage();                  // document blocks per message, null when uncapped
+$client::supportsFileApi();                     // whether uploadFile() will work at all
+```
+
+Every limit is expressed in **decoded** bytes. Clients enforce them before a
+request leaves the process and throw `GenAiFileTooLargeException` — carrying
+`$actualBytes` and `$limitBytes` — so an oversized file costs no round trip.
+
+Office conversion is bounded too. `SpreadsheetToText` and `WordDocumentToPdf`
+accept an optional `ConversionLimits` capping input size, output size, rows,
+cells, and wall-clock time; XLSX and DOCX are ZIP containers, so a few kilobytes
+on the wire can expand into gigabytes of worksheet. Use
+`ConversionLimits::untrusted()` for end-user uploads:
+
+```php
+use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
+use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
+
+$text = SpreadsheetToText::convert($base64, $mime, ConversionLimits::untrusted());
+```
+
+Spreadsheet extraction truncates rather than throws when it hits a row, cell,
+output, or time ceiling, and marks the cut with a `=== Truncated: … ===` line.
+
 Bedrock natively accepts the Office formats via its own `document` block (the
 Converse API lists `pdf, csv, doc, docx, xls, xlsx, html, txt, md` as native
 formats), so no conversion runs for Bedrock requests.
@@ -410,7 +442,9 @@ formats), so no conversion runs for Bedrock requests.
 | File upload API | ✅ `uploadFile()` | ❌ inline only | ❌ inline only |
 | Inline file bytes | ✅ | ✅ | ✅ |
 | Tool/function calling | ✅ | ✅ | ✅ |
-| File size limit | 20 MB | 4.5 MB | 4.5 MB |
+| Max inline file (decoded) | 15 MB | 4.5 MB doc / 3.75 MB image | 24 MB doc / 5 MB image |
+| Max uploaded file | 2 GB | n/a | 500 MB |
+| Documents per message | unlimited | 5 | unlimited |
 | System prompts | ✅ | ✅ | ✅ |
 | `listModels()` | ✅ | ✅ (control-plane) | ✅ |
 | `checkCredentials()` | ✅ | ✅ | ✅ |
