@@ -1,0 +1,50 @@
+name: Live smoke tests
+
+# Opt-in: mocked HTTP tests cannot detect a retired model ID or a wire-contract
+# change, so this job talks to the real provider APIs. It runs on a schedule and
+# on demand only, and every test skips itself when its provider's credentials
+# are not configured, so a fork without secrets sees a green, all-skipped run.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: "Comma-separated providers to exercise (gemini, anthropic, bedrock). Empty runs every provider that has credentials."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: Live provider smoke tests
+    runs-on: ubuntu-24.04-arm
+    environment: live-smoke-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: mbstring, json
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction
+
+      - name: Run live smoke tests
+        env:
+          GENAI_LIVE_TESTS: "1"
+          GENAI_LIVE_PROVIDERS: ${{ github.event.inputs.providers }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
+          BEDROCK_REGION: ${{ vars.BEDROCK_REGION }}
+          BEDROCK_MODEL: ${{ vars.BEDROCK_MODEL }}
+        run: vendor/bin/phpunit --configuration phpunit.xml --testsuite Live

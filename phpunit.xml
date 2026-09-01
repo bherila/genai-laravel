@@ -2,11 +2,18 @@
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
          bootstrap="vendor/autoload.php"
+         defaultTestSuite="Unit"
          colors="true"
 >
     <testsuites>
         <testsuite name="Unit">
             <directory>tests/Unit</directory>
+        </testsuite>
+        <!-- Opt-in: hits the real provider APIs. Run with `phpunit --testsuite Live`
+             and provider credentials in the environment; every test skips itself
+             when its provider is not configured. -->
+        <testsuite name="Live">
+            <directory>tests/Live</directory>
         </testsuite>
     </testsuites>
     <source>

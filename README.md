@@ -2,6 +2,18 @@
 
 Provider-agnostic GenAI client for Laravel. Supports Google Gemini, AWS Bedrock (Claude), and Anthropic direct API through a single interface.
 
+## Requirements
+
+- PHP 8.4+
+- Laravel 13
+
+Laravel 13 ships a first-party AI SDK (`laravel/ai`) covering text generation
+across the same providers. This package stays focused on what that abstraction
+does not cover: runtime per-tenant credentials, raw provider parity (model
+enumeration, normalised token/cost accounting), and automatic Office-document
+conversion. If you only need plain text generation on Laravel 13, prefer
+`laravel/ai`.
+
 ## Installation
 
 ```bash

@@ -7,22 +7,24 @@ on:
 
 jobs:
   test:
-    name: PHP ${{ matrix.php }} / Laravel ${{ matrix.laravel }}
+    name: PHP ${{ matrix.php }} / Laravel ${{ matrix.laravel }} / ${{ matrix.dependencies }}
     runs-on: ubuntu-24.04-arm
 
     strategy:
       fail-fast: false
       matrix:
-        php: ["8.2", "8.3", "8.5"]
-        laravel: ["12.*", "13.*"]
-        exclude:
-          - php: "8.2"
-            laravel: "13.*"
+        php: ["8.4", "8.5"]
+        laravel: ["13.*"]
+        dependencies: ["highest"]
         include:
-          - laravel: "12.*"
-            testbench: "^10"
           - laravel: "13.*"
             testbench: "^11"
+          # One lowest-dependency job so the declared floor of every constraint
+          # is actually exercised rather than assumed.
+          - php: "8.4"
+            laravel: "13.*"
+            testbench: "^11"
+            dependencies: "lowest"
 
     steps:
       - uses: actions/checkout@v4
@@ -39,10 +41,41 @@ jobs:
           composer require "laravel/framework:${{ matrix.laravel }}" \
                            "orchestra/testbench:${{ matrix.testbench }}" \
                            --no-interaction --no-update
-          composer update --prefer-stable --prefer-dist --no-interaction
+          if [ "${{ matrix.dependencies }}" = "lowest" ]; then
+            composer update --prefer-lowest --prefer-stable --prefer-dist --no-interaction
+          else
+            composer update --prefer-stable --prefer-dist --no-interaction
+          fi
 
       - name: Run tests
         run: vendor/bin/phpunit --configuration phpunit.xml
 
       - name: Static analysis (PHPStan)
         run: vendor/bin/phpstan analyse --no-progress --memory-limit=512M
+
+  static:
+    name: Lint and maintenance checks
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: mbstring, json
+          coverage: none
+
+      # Runs before install so a malformed manifest fails fast.
+      - name: Validate composer.json / composer.lock
+        run: composer validate --strict
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction
+
+      - name: Code style (Pint)
+        run: vendor/bin/pint --test
+
+      - name: Security advisories (composer audit)
+        run: composer audit --locked
