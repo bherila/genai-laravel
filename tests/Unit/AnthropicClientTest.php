@@ -5,8 +5,9 @@ namespace Bherila\GenAiLaravel\Tests\Unit;
 use Bherila\GenAiLaravel\Clients\AnthropicClient;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
-use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
 use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -66,26 +67,141 @@ class AnthropicClientTest extends TestCase
         $this->assertNull(AnthropicClient::maxFilesPerMessage());
     }
 
-    // ── file API ─────────────────────────────────────────────────────────────
+    // ── Files API ────────────────────────────────────────────────────────────
 
-    public function test_upload_file_reports_the_capability_as_unsupported(): void
+    public function test_supports_the_files_api(): void
     {
-        $this->assertFalse(AnthropicClient::supportsFileApi());
-
-        $this->expectException(GenAiUnsupportedOperationException::class);
-        $this->makeClient()->uploadFile('bytes', 'application/pdf');
+        $this->assertTrue(AnthropicClient::supportsFileApi());
     }
 
-    public function test_delete_file_is_noop(): void
+    public function test_upload_file_posts_multipart_and_returns_the_file_id(): void
     {
-        $this->makeClient()->deleteFile('files/abc');
+        Http::fake(['*' => Http::response(['id' => 'file_011CNha8iCJcU1wXNR6q4V8w', 'type' => 'file'])]);
+
+        $id = $this->makeClient()->uploadFile('report bytes', 'application/pdf', 'report.pdf');
+
+        $this->assertSame('file_011CNha8iCJcU1wXNR6q4V8w', $id);
+
+        Http::assertSent(function (Request $req) {
+            return str_ends_with($req->url(), '/v1/files')
+                && $req->method() === 'POST'
+                && $req->isMultipart()
+                && $req->header('anthropic-beta')[0] === 'files-api-2025-04-14'
+                && $req->header('x-api-key')[0] === 'test-key';
+        });
+    }
+
+    public function test_upload_file_throws_upload_exception_on_failure(): void
+    {
+        Http::fake(['*' => Http::response(['error' => 'nope'], 413)]);
+
+        try {
+            $this->makeClient()->uploadFile('bytes', 'application/pdf');
+            $this->fail('Expected GenAiUploadException.');
+        } catch (GenAiUploadException $e) {
+            $this->assertSame(413, $e->status);
+        }
+    }
+
+    public function test_upload_file_rejects_a_file_over_the_files_api_limit(): void
+    {
+        Http::fake(['*' => Http::response(['id' => 'file_x'])]);
+
+        // A sparse file: fstat reports 500 MB + 1 without writing 500 MB.
+        $path = tempnam(sys_get_temp_dir(), 'genai_oversize_');
+        $stream = fopen($path, 'r+');
+        ftruncate($stream, (int) AnthropicClient::maxUploadedFileBytes() + 1);
+
+        try {
+            $this->makeClient()->uploadFile($stream, 'application/pdf');
+            $this->fail('Expected GenAiFileTooLargeException.');
+        } catch (GenAiFileTooLargeException $e) {
+            $this->assertSame(500 * 1024 * 1024, $e->limitBytes);
+        } finally {
+            fclose($stream);
+            @unlink($path);
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_delete_file_calls_the_files_endpoint(): void
+    {
+        Http::fake(['*' => Http::response([], 200)]);
+
+        $this->makeClient()->deleteFile('file_abc123');
+
+        Http::assertSent(fn (Request $req) => $req->method() === 'DELETE'
+            && str_ends_with($req->url(), '/v1/files/file_abc123'));
+    }
+
+    public function test_delete_file_does_not_throw_on_failure(): void
+    {
+        // deleteFile() usually runs in a finally block; throwing there would
+        // replace whatever error sent us into cleanup.
+        Http::fake(['*' => Http::response(['error' => 'gone'], 404)]);
+
+        $this->makeClient()->deleteFile('file_missing');
+
         $this->addToAssertionCount(1);
     }
 
-    public function test_converse_with_file_ref_throws_unsupported_operation(): void
+    public function test_converse_with_file_ref_sends_a_file_source_document_block(): void
     {
-        $this->expectException(GenAiUnsupportedOperationException::class);
-        $this->makeClient()->converseWithFileRef('files/abc', 'application/pdf', 'test');
+        Http::fake(['*' => Http::response($this->fakeTextResponse())]);
+
+        $this->makeClient()->converseWithFileRef('file_abc123', 'application/pdf', 'Summarize.');
+
+        Http::assertSent(function (Request $req) {
+            $content = $req->data()['messages'][0]['content'] ?? [];
+
+            return ($content[0]['type'] ?? '') === 'document'
+                && ($content[0]['source']['type'] ?? '') === 'file'
+                && ($content[0]['source']['file_id'] ?? '') === 'file_abc123'
+                && ($content[1]['text'] ?? '') === 'Summarize.';
+        });
+    }
+
+    public function test_file_reference_to_an_image_uses_the_image_block(): void
+    {
+        Http::fake(['*' => Http::response($this->fakeTextResponse())]);
+
+        $this->makeClient()->converse('', [[
+            'role' => 'user',
+            'content' => [ContentBlock::fileReference('file_img', 'image/png')],
+        ]]);
+
+        Http::assertSent(function (Request $req) {
+            $block = $req->data()['messages'][0]['content'][0] ?? [];
+
+            return ($block['type'] ?? '') === 'image'
+                && ($block['source']['file_id'] ?? '') === 'file_img';
+        });
+    }
+
+    public function test_list_files_paginates(): void
+    {
+        $calls = 0;
+        Http::fake(['*' => function () use (&$calls) {
+            $calls++;
+
+            return $calls === 1
+                ? Http::response(['data' => [['id' => 'file_a']], 'has_more' => true, 'last_id' => 'file_a'])
+                : Http::response(['data' => [['id' => 'file_b']], 'has_more' => false]);
+        }]);
+
+        $files = $this->makeClient()->listFiles();
+
+        $this->assertSame(['file_a', 'file_b'], array_column($files, 'id'));
+    }
+
+    public function test_file_metadata_returns_the_provider_entry(): void
+    {
+        Http::fake(['*' => Http::response(['id' => 'file_abc', 'filename' => 'report.pdf', 'size_bytes' => 12])]);
+
+        $meta = $this->makeClient()->fileMetadata('file_abc');
+
+        $this->assertSame('report.pdf', $meta['filename']);
     }
 
     // ── converse ─────────────────────────────────────────────────────────────

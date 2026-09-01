@@ -110,6 +110,17 @@ class BedrockClientTest extends TestCase
         $this->makeClient()->converseWithFileRef('files/abc', 'application/pdf', 'test');
     }
 
+    public function test_file_reference_content_block_throws_unsupported_operation(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $this->expectException(GenAiUnsupportedOperationException::class);
+        $this->makeClient()->converse('', [[
+            'role' => 'user',
+            'content' => [ContentBlock::fileReference('file_abc', 'application/pdf')],
+        ]]);
+    }
+
     // ── size and count limits ────────────────────────────────────────────────
 
     public function test_oversized_inline_document_is_rejected_before_the_request(): void

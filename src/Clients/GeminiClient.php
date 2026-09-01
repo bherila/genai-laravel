@@ -517,6 +517,13 @@ class GeminiClient implements GenAiClient
 
     private function contentBlockToGeminiPart(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_FILE_REFERENCE) {
+            $mime = (string) $block->mimeType;
+            $this->assertSupportedDocumentMimeType($mime);
+
+            return ['file_data' => ['mime_type' => $mime, 'file_uri' => (string) $block->fileRef]];
+        }
+
         if ($block->type === 'document') {
             $mime = (string) $block->mimeType;
 

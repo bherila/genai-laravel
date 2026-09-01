@@ -6,7 +6,6 @@ use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
-use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
 use Bherila\GenAiLaravel\FileLimits;
@@ -18,6 +17,7 @@ use Bherila\GenAiLaravel\ToolDefinition;
 use Bherila\GenAiLaravel\Usage;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Anthropic Messages API implementation of GenAiClient.
@@ -39,6 +39,12 @@ class AnthropicClient implements GenAiClient
     private const API_BASE = 'https://api.anthropic.com';
 
     private const API_VERSION = '2023-06-01';
+
+    /**
+     * Beta flag required by the Files API and by `source: {type: "file"}` blocks.
+     * https://platform.claude.com/docs/en/build-with-claude/files
+     */
+    private const FILES_API_BETA = 'files-api-2025-04-14';
 
     /**
      * MIME types the Anthropic Messages API accepts as a `document` content block.
@@ -67,9 +73,13 @@ class AnthropicClient implements GenAiClient
         'image/webp',
     ];
 
+    private string $apiKey;
+
     private string $model;
 
     private int $maxTokens;
+
+    private int $timeout;
 
     private PendingRequest $http;
 
@@ -82,11 +92,14 @@ class AnthropicClient implements GenAiClient
         int $timeout = 240,
         ?RetryStrategy $retry = null,
     ) {
+        $this->apiKey = $apiKey;
         $this->model = $model;
         $this->maxTokens = $maxTokens;
+        $this->timeout = $timeout;
         $this->http = Http::withHeaders([
             'x-api-key' => $apiKey,
             'anthropic-version' => self::API_VERSION,
+            'anthropic-beta' => self::FILES_API_BETA,
             'Content-Type' => 'application/json',
         ])->timeout($timeout);
         $this->retry = $retry ?? RetryStrategy::fromConfig();
@@ -165,28 +178,155 @@ class AnthropicClient implements GenAiClient
 
     public static function supportsFileApi(): bool
     {
-        return false;
+        return true;
     }
 
-    /** @throws GenAiUnsupportedOperationException */
+    /**
+     * Upload a file to the Anthropic Files API and return its `file_id`.
+     *
+     * Security note worth reading before you use this for multi-tenant data:
+     * uploaded files are scoped to the API **workspace**, not to a user or a
+     * conversation. Any key in the same workspace can reference the returned
+     * file_id. Where tenants must not see each other's documents, give each one
+     * its own workspace (and therefore its own key) — or keep sending bytes
+     * inline, which stores nothing.
+     * https://platform.claude.com/docs/en/build-with-claude/files
+     *
+     * @param  resource|string  $fileContent
+     *
+     * @throws GenAiFileTooLargeException When the file exceeds the Files API limit.
+     * @throws GenAiUploadException When Anthropic rejects or fails the upload.
+     */
     public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): string
     {
-        throw new GenAiUnsupportedOperationException(
-            'This client does not implement the Anthropic Files API yet. Send the bytes '
-            .'inline with converseWithInlineFile() or ContentBlock::document().'
-        );
+        $size = FileLimits::contentLength($fileContent);
+        if ($size !== null) {
+            FileLimits::assertWithin($size, (int) self::maxUploadedFileBytes(), 'Anthropic Files API', 'the uploaded file');
+        }
+
+        $filename = $displayName !== '' ? $displayName : 'genai-upload-'.time();
+
+        // Built from scratch rather than from $this->http: that one pins
+        // Content-Type: application/json, which would break the multipart body.
+        $response = Http::withHeaders([
+            'x-api-key' => $this->apiKey,
+            'anthropic-version' => self::API_VERSION,
+            'anthropic-beta' => self::FILES_API_BETA,
+        ])
+            ->attach('file', $fileContent, $filename, ['Content-Type' => $mimeType])
+            ->timeout($this->timeout)
+            ->post(self::API_BASE.'/v1/files');
+
+        if (! $response->successful()) {
+            throw new GenAiUploadException(
+                'Anthropic Files API upload failed with HTTP '.$response->status().': '.$response->body(),
+                status: $response->status(),
+                body: $response->body(),
+            );
+        }
+
+        $id = $response->json('id');
+        if (! is_string($id) || $id === '') {
+            throw new GenAiUploadException(
+                'Anthropic Files API upload succeeded but returned no file id.',
+                status: $response->status(),
+                body: $response->body(),
+            );
+        }
+
+        return $id;
     }
 
-    /** No-op: this client does not store uploaded files. */
-    public function deleteFile(string $fileRef): void {}
+    /**
+     * Delete an uploaded file.
+     *
+     * Failures are logged rather than thrown: deletion is cleanup, usually run
+     * from a `finally` block, and throwing there would mask the original error.
+     */
+    public function deleteFile(string $fileRef): void
+    {
+        try {
+            $response = $this->http->delete(self::API_BASE.'/v1/files/'.rawurlencode($fileRef));
+            if (! $response->successful()) {
+                Log::warning('Anthropic: failed to delete file', [
+                    'file_ref' => $fileRef,
+                    'status' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Anthropic: failed to delete file', ['file_ref' => $fileRef, 'error' => $e->getMessage()]);
+        }
+    }
 
-    /** @throws GenAiUnsupportedOperationException */
+    /**
+     * List the files visible to this workspace.
+     *
+     * Provider-specific (the shared contract has no listing method); entries are
+     * returned as Anthropic sends them.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function listFiles(): array
+    {
+        $files = [];
+        $afterId = null;
+
+        do {
+            $query = ['limit' => 1000];
+            if ($afterId !== null) {
+                $query['after_id'] = $afterId;
+            }
+
+            $payload = $this->retry->execute(
+                fn () => $this->http->get(self::API_BASE.'/v1/files', $query),
+                'Anthropic list files',
+            )->json() ?? [];
+
+            foreach ($payload['data'] ?? [] as $entry) {
+                if (is_array($entry)) {
+                    $files[] = $entry;
+                }
+            }
+
+            $hasMore = (bool) ($payload['has_more'] ?? false);
+            $afterId = $hasMore && is_string($payload['last_id'] ?? null) ? $payload['last_id'] : null;
+        } while ($afterId !== null);
+
+        return $files;
+    }
+
+    /**
+     * Retrieve metadata for one uploaded file (filename, mime_type, size_bytes, …).
+     *
+     * @return array<string, mixed>
+     */
+    public function fileMetadata(string $fileRef): array
+    {
+        $response = $this->retry->execute(
+            fn () => $this->http->get(self::API_BASE.'/v1/files/'.rawurlencode($fileRef)),
+            'Anthropic file metadata',
+        );
+
+        $payload = $response->json();
+
+        return is_array($payload) ? $payload : [];
+    }
+
+    /**
+     * Send a Messages API request referencing an already-uploaded file.
+     */
     public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
     {
-        throw new GenAiUnsupportedOperationException(
-            'This client does not implement the Anthropic Files API yet. Use converseWithInlineFile() '
-            .'with base64-encoded bytes.'
-        );
+        $messages = [[
+            'role' => 'user',
+            'content' => [
+                ContentBlock::fileReference($fileRef, $mimeType),
+                ContentBlock::text($prompt),
+            ],
+        ]];
+
+        return $this->converse('', $messages, $toolConfig);
     }
 
     /**
@@ -375,6 +515,15 @@ class AnthropicClient implements GenAiClient
 
     private function contentBlockToAnthropic(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_FILE_REFERENCE) {
+            $mime = (string) $block->mimeType;
+            $source = ['type' => 'file', 'file_id' => (string) $block->fileRef];
+
+            return self::isSupportedImageMimeType($mime)
+                ? ['type' => 'image', 'source' => $source]
+                : ['type' => 'document', 'source' => $source];
+        }
+
         if ($block->type === 'document') {
             $mime = (string) $block->mimeType;
 

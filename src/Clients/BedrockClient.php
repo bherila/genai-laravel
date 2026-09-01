@@ -383,6 +383,13 @@ class BedrockClient implements GenAiClient
 
     private function contentBlockToBedrock(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_FILE_REFERENCE) {
+            throw new GenAiUnsupportedOperationException(
+                'Bedrock has no File API, so ContentBlock::fileReference() cannot be sent to it. '
+                .'Use ContentBlock::document() with base64-encoded bytes instead.'
+            );
+        }
+
         if ($block->type === 'document') {
             $mime = (string) ($block->mimeType ?? '');
             $this->assertInlineSizeWithinLimit((string) $block->base64, $mime);

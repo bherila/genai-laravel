@@ -124,6 +124,26 @@ class GeminiClientTest extends TestCase
         Http::assertSent(fn (Request $req) => $req->header('x-goog-api-key')[0] === 'test-api-key');
     }
 
+    public function test_file_reference_content_block_becomes_a_file_data_part(): void
+    {
+        Http::fake(['*' => Http::response(['candidates' => []])]);
+
+        $this->makeClient()->converse('', [[
+            'role' => 'user',
+            'content' => [
+                ContentBlock::fileReference('https://generativelanguage.googleapis.com/v1beta/files/abc', 'application/pdf'),
+                ContentBlock::text('Summarise.'),
+            ],
+        ]]);
+
+        Http::assertSent(function (Request $req) {
+            $parts = $req->data()['contents'][0]['parts'] ?? [];
+
+            return ($parts[0]['file_data']['mime_type'] ?? '') === 'application/pdf'
+                && str_ends_with($parts[0]['file_data']['file_uri'] ?? '', '/files/abc');
+        });
+    }
+
     // ── deleteFile ───────────────────────────────────────────────────────────
 
     public function test_delete_file_calls_correct_endpoint(): void

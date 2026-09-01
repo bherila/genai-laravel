@@ -165,23 +165,59 @@ ToolChoice::none()          // model must not call any tool
 ToolChoice::tool('my_fn')   // model must call this specific tool
 ```
 
-### Gemini File API (large files)
+### File APIs (large files)
+
+Gemini and Anthropic both store uploaded files and let you reference them by ID
+instead of re-sending the bytes on every turn; Bedrock does not. Branch on
+`supportsFileApi()` rather than on the provider name.
+
+Upload, reference, delete — the reference flows through the same builder as
+inline bytes:
 
 ```php
 $fileRef = $client->uploadFile($stream, 'application/pdf', 'report.pdf');
+
 try {
     $response = GenAiRequest::with($client)
-        ->messages([[
-            'role' => 'user',
-            'content' => [ContentBlock::text('Summarise this report.')],
-        ]])
+        ->withFileRef($fileRef, 'application/pdf')
+        ->prompt('Summarise this report.')
         ->generate();
-    // or use the lower-level method directly:
-    $raw = $client->converseWithFileRef($fileRef, 'application/pdf', 'Summarise.');
+
+    echo $response->text;
 } finally {
     $client->deleteFile($fileRef);
 }
 ```
+
+`ContentBlock::fileReference()` is the same thing at the message level, so an
+uploaded file and inline bytes can sit side by side in one turn:
+
+```php
+->messages([[
+    'role' => 'user',
+    'content' => [
+        ContentBlock::fileReference($fileRef, 'application/pdf'),
+        ContentBlock::document($smallBase64, 'application/pdf'),
+        ContentBlock::text('Which figures changed?'),
+    ],
+]])
+```
+
+The lower-level `converseWithFileRef($fileRef, $mime, $prompt)` is still there
+for a single-file, single-prompt call.
+
+`uploadFile()` returns the provider's reference as a string and throws on
+failure — `GenAiUnsupportedOperationException` when the provider has no File API,
+`GenAiUploadException` when the upload itself failed, `GenAiFileTooLargeException`
+when the file is over the provider's ceiling. It never returns `null`.
+
+> **Anthropic file scoping.** Files uploaded to the Anthropic Files API are
+> scoped to the API **workspace**, not to a user or a conversation: any key in
+> the same workspace can reference the returned `file_id`. Where tenants must
+> not see each other's documents, give each one its own workspace and key, or
+> keep sending bytes inline — which stores nothing. Anthropic also exposes
+> listing and metadata, surfaced here as the provider-specific
+> `AnthropicClient::listFiles()` and `::fileMetadata()`.
 
 ### Dependency injection (single provider)
 
@@ -439,7 +475,7 @@ formats), so no conversion runs for Bedrock requests.
 
 | Feature | Gemini | Bedrock | Anthropic |
 |---|---|---|---|
-| File upload API | ✅ `uploadFile()` | ❌ inline only | ❌ inline only |
+| File upload API | ✅ `uploadFile()` | ❌ inline only | ✅ `uploadFile()` |
 | Inline file bytes | ✅ | ✅ | ✅ |
 | Tool/function calling | ✅ | ✅ | ✅ |
 | Max inline file (decoded) | 15 MB | 4.5 MB doc / 3.75 MB image | 24 MB doc / 5 MB image |
