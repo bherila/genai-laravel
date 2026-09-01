@@ -133,7 +133,11 @@ class BedrockClient implements GenAiClient
             $payload['system'] = [['text' => $system]];
         }
 
-        if ($toolConfig !== null) {
+        // Bedrock has no `none` toolChoice: an omitted toolChoice means *auto*, so
+        // leaving the tool definitions in place would still let the model call one.
+        // Suppressing the whole toolConfig is the only way to express "no tools".
+        // https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolChoice.html
+        if ($toolConfig !== null && $toolConfig->choice->type !== ToolChoice::NONE) {
             $payload['toolConfig'] = $this->toolConfigToBedrock($toolConfig);
         }
 
@@ -358,16 +362,10 @@ class BedrockClient implements GenAiClient
         $toolChoice = match ($config->choice->type) {
             ToolChoice::ANY => ['any' => (object) []],
             ToolChoice::TOOL => ['tool' => ['name' => $config->choice->toolName]],
-            ToolChoice::NONE => null,
             default => ['auto' => (object) []],
         };
 
-        $result = ['tools' => $tools];
-        if ($toolChoice !== null) {
-            $result['toolChoice'] = $toolChoice;
-        }
-
-        return $result;
+        return ['tools' => $tools, 'toolChoice' => $toolChoice];
     }
 
     /**

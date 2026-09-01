@@ -258,7 +258,12 @@ class BedrockClientTest extends TestCase
         });
     }
 
-    public function test_none_tool_choice_omits_tool_choice_key(): void
+    /**
+     * Bedrock treats an absent toolChoice as `auto`, so leaving the tool
+     * definitions in the payload would still let the model call one. The only
+     * way to express "no tools" is to send no toolConfig at all.
+     */
+    public function test_none_tool_choice_omits_the_entire_tool_config(): void
     {
         Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
 
@@ -272,8 +277,23 @@ class BedrockClientTest extends TestCase
         Http::assertSent(function (Request $req) {
             $body = $req->data();
 
-            return isset($body['toolConfig']['tools']) && ! array_key_exists('toolChoice', $body['toolConfig']);
+            return ! array_key_exists('toolConfig', $body)
+                && ! str_contains($req->body(), 'my_tool');
         });
+    }
+
+    public function test_auto_tool_choice_is_sent_explicitly(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('my_tool', 'desc', Schema::object([]))],
+            choice: ToolChoice::auto(),
+        );
+
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]], $toolConfig);
+
+        Http::assertSent(fn (Request $req) => str_contains($req->body(), '"auto":{}'));
     }
 
     // ── extractText ───────────────────────────────────────────────────────────
