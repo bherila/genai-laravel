@@ -179,6 +179,30 @@ class AnthropicClientTest extends TestCase
         });
     }
 
+    public function test_file_reference_requests_carry_the_files_beta_header(): void
+    {
+        Http::fake(['*' => Http::response($this->fakeTextResponse())]);
+
+        $this->makeClient()->converseWithFileRef('file_abc123', 'application/pdf', 'Summarize.');
+
+        Http::assertSent(fn (Request $req) => ($req->header('anthropic-beta')[0] ?? '') === 'files-api-2025-04-14');
+    }
+
+    public function test_plain_requests_do_not_carry_the_files_beta_header(): void
+    {
+        Http::fake(['*' => Http::response($this->fakeTextResponse())]);
+
+        $client = $this->makeClient();
+        // Ordered deliberately: a file request must not leave the beta header
+        // attached to the client for every later call.
+        $client->converseWithFileRef('file_abc123', 'application/pdf', 'Summarize.');
+        $client->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        [$last] = Http::recorded()->last();
+
+        $this->assertSame([], $last->header('anthropic-beta'));
+    }
+
     public function test_list_files_paginates(): void
     {
         $calls = 0;

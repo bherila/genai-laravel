@@ -84,6 +84,13 @@ class AnthropicClient implements GenAiClient
 
     private PendingRequest $http;
 
+    /**
+     * Same client plus the Files API beta flag. Kept as a separate instance
+     * because PendingRequest::withHeaders() mutates in place — deriving it on
+     * demand would leak the beta header into every later request.
+     */
+    private PendingRequest $filesHttp;
+
     private RetryStrategy $retry;
 
     public function __construct(
@@ -98,6 +105,11 @@ class AnthropicClient implements GenAiClient
         $this->maxTokens = $maxTokens;
         $this->timeout = $timeout;
         $this->http = Http::withHeaders([
+            'x-api-key' => $apiKey,
+            'anthropic-version' => self::API_VERSION,
+            'Content-Type' => 'application/json',
+        ])->timeout($timeout);
+        $this->filesHttp = Http::withHeaders([
             'x-api-key' => $apiKey,
             'anthropic-version' => self::API_VERSION,
             'anthropic-beta' => self::FILES_API_BETA,
@@ -247,7 +259,7 @@ class AnthropicClient implements GenAiClient
     public function deleteFile(string $fileRef): void
     {
         try {
-            $response = $this->http->delete(self::API_BASE.'/v1/files/'.rawurlencode($fileRef));
+            $response = $this->filesHttp->delete(self::API_BASE.'/v1/files/'.rawurlencode($fileRef));
             if (! $response->successful()) {
                 Log::warning('Anthropic: failed to delete file', [
                     'file_ref' => $fileRef,
@@ -280,7 +292,7 @@ class AnthropicClient implements GenAiClient
             }
 
             $payload = $this->retry->execute(
-                fn () => $this->http->get(self::API_BASE.'/v1/files', $query),
+                fn () => $this->filesHttp->get(self::API_BASE.'/v1/files', $query),
                 'Anthropic list files',
             )->json() ?? [];
 
@@ -305,7 +317,7 @@ class AnthropicClient implements GenAiClient
     public function fileMetadata(string $fileRef): array
     {
         $response = $this->retry->execute(
-            fn () => $this->http->get(self::API_BASE.'/v1/files/'.rawurlencode($fileRef)),
+            fn () => $this->filesHttp->get(self::API_BASE.'/v1/files/'.rawurlencode($fileRef)),
             'Anthropic file metadata',
         );
 
@@ -367,8 +379,13 @@ class AnthropicClient implements GenAiClient
             $payload['tool_choice'] = $native['tool_choice'];
         }
 
+        // The beta flag rides along only when the payload actually references an
+        // uploaded file, so applications that never touch the Files API keep an
+        // unchanged request shape.
+        $http = self::mentionsFileSource($payload['messages']) ? $this->filesHttp : $this->http;
+
         $response = $this->retry->execute(
-            fn () => $this->http->post(self::API_BASE.'/v1/messages', $payload),
+            fn () => $http->post(self::API_BASE.'/v1/messages', $payload),
             'Anthropic Messages',
         );
 
@@ -502,6 +519,22 @@ class AnthropicClient implements GenAiClient
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
+
+    /**
+     * @param  list<array{role: string, content: list<array<string, mixed>>}>  $messages
+     */
+    private static function mentionsFileSource(array $messages): bool
+    {
+        foreach ($messages as $message) {
+            foreach ($message['content'] as $block) {
+                if (($block['source']['type'] ?? '') === 'file') {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
 
     /** @param  list<array{role: string, content: list<ContentBlock>}>  $messages */
     private function convertMessages(array $messages): array
