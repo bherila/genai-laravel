@@ -5,6 +5,7 @@ namespace Bherila\GenAiLaravel\Tests\Unit;
 use Bherila\GenAiLaravel\Clients\AnthropicClient;
 use Bherila\GenAiLaravel\Clients\BedrockClient;
 use Bherila\GenAiLaravel\Clients\GeminiClient;
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
 use Bherila\GenAiLaravel\ModelInfo;
@@ -290,12 +291,78 @@ class ListModelsTest extends TestCase
 
         // embedding model is filtered out — can't be used via generateContent.
         $this->assertCount(1, $models);
-        $this->assertSame('models/gemini-2.5-flash', $models[0]->id);
+        // Resource name normalised to the call-ready ID generateContent expects.
+        $this->assertSame('gemini-2.5-flash', $models[0]->id);
         $this->assertSame('Gemini 2.5 Flash', $models[0]->name);
         $this->assertSame('gemini', $models[0]->provider);
         $this->assertSame('Fast and cheap', $models[0]->description);
         $this->assertSame(1_048_576, $models[0]->inputTokenLimit);
         $this->assertSame(8192, $models[0]->outputTokenLimit);
+    }
+
+    public function test_gemini_list_models_prefers_base_model_id(): void
+    {
+        Http::fake([
+            'https://generativelanguage.googleapis.com/v1beta/models*' => Http::response([
+                'models' => [[
+                    'name' => 'models/gemini-3.6-flash-001',
+                    'baseModelId' => 'gemini-3.6-flash',
+                    'displayName' => 'Gemini 3.6 Flash',
+                    'supportedGenerationMethods' => ['generateContent'],
+                ]],
+            ]),
+        ]);
+
+        $models = (new GeminiClient(apiKey: 'test'))->listModels();
+
+        $this->assertSame('gemini-3.6-flash', $models[0]->id);
+    }
+
+    /**
+     * The README calls listModels() IDs "call-ready" — this is the round trip
+     * that makes that true. Feeding a returned ID back into a client must build
+     * `/v1beta/models/<id>:generateContent`, not `/v1beta/models/models/<id>:…`.
+     */
+    public function test_gemini_list_models_ids_are_call_ready(): void
+    {
+        Http::fake([
+            // Ordered: the catalog pattern would otherwise swallow the inference URL.
+            '*:generateContent' => Http::response(['candidates' => []]),
+            'https://generativelanguage.googleapis.com/v1beta/models*' => Http::response([
+                'models' => [[
+                    'name' => 'models/gemini-3.6-flash',
+                    'displayName' => 'Gemini 3.6 Flash',
+                    'supportedGenerationMethods' => ['generateContent'],
+                ]],
+            ]),
+        ]);
+
+        $catalogued = (new GeminiClient(apiKey: 'test'))->listModels()[0];
+
+        (new GeminiClient(apiKey: 'test', model: $catalogued->id))
+            ->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        Http::assertSent(function (Request $req) {
+            if (! str_contains($req->url(), ':generateContent')) {
+                return false;
+            }
+
+            return substr_count($req->url(), '/models/') === 1
+                && str_contains($req->url(), '/v1beta/models/gemini-3.6-flash:generateContent');
+        });
+    }
+
+    public function test_gemini_client_tolerates_a_resource_name_as_the_configured_model(): void
+    {
+        Http::fake(['*' => Http::response(['candidates' => []])]);
+
+        $client = new GeminiClient(apiKey: 'test', model: 'models/gemini-3.6-flash');
+
+        $this->assertSame('gemini-3.6-flash', $client->model());
+
+        $client->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        Http::assertSent(fn (Request $req) => substr_count($req->url(), '/models/') === 1);
     }
 
     public function test_gemini_list_models_sends_api_key_header(): void

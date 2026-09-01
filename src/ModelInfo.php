@@ -6,8 +6,8 @@ namespace Bherila\GenAiLaravel;
  * Provider-agnostic description of a model offered by a GenAI provider.
  *
  * Every provider's list-models endpoint uses a different shape (Anthropic:
- * id / display_name; Bedrock: modelId / modelName; Gemini: name / displayName),
- * and none of them return pricing. This value object normalises the identity
+ * id / display_name; Bedrock: modelId / modelName; Gemini: baseModelId / name /
+ * displayName), and none of them return pricing. This value object normalises the identity
  * and capability fields and leaves cost as nullable — callers that track
  * pricing out-of-band can populate the cost fields themselves, or read them as
  * `null` when the provider does not advertise pricing in its catalog.
@@ -15,7 +15,10 @@ namespace Bherila\GenAiLaravel;
 final class ModelInfo
 {
     /**
-     * @param  string  $id  The identifier used to call the model (e.g. "claude-sonnet-4-5", "anthropic.claude-3-sonnet-20240229-v1:0", "models/gemini-2.5-flash").
+     * @param  string  $id  The identifier used to call the model, ready to pass straight
+     *                       back to the provider (e.g. "claude-sonnet-4-5",
+     *                       "anthropic.claude-3-sonnet-20240229-v1:0", "gemini-3.6-flash").
+     *                       Gemini resource names are normalised: the `models/` prefix is stripped.
      * @param  string  $name  Human-readable display name.
      * @param  string  $provider  The provider identifier ("anthropic", "bedrock", "gemini").
      * @param  string|null  $description  Free-form description when the provider supplies one.

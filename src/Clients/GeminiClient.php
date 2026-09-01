@@ -56,7 +56,7 @@ class GeminiClient implements GenAiClient
         ?string $responseMimeType = 'application/json',
     ) {
         $this->apiKey = $apiKey;
-        $this->model = $model;
+        $this->model = self::normaliseModelId($model);
         $this->timeout = $timeout;
         $this->responseMimeType = $responseMimeType !== '' ? $responseMimeType : null;
         $this->retry = $retry ?? RetryStrategy::fromConfig();
@@ -70,6 +70,18 @@ class GeminiClient implements GenAiClient
     public function model(): string
     {
         return $this->model;
+    }
+
+    /**
+     * Strip the `models/` resource-name prefix so an ID taken straight out of
+     * listModels() (or Google's docs, which quote both forms) is call-ready.
+     *
+     * Tuned models keep their own `tunedModels/` prefix — it is part of the path
+     * the API expects — so only the `models/` collection prefix is removed.
+     */
+    private static function normaliseModelId(string $model): string
+    {
+        return str_starts_with($model, 'models/') ? substr($model, strlen('models/')) : $model;
     }
 
     /**
@@ -321,7 +333,13 @@ class GeminiClient implements GenAiClient
                 'Gemini list models',
             )->json() ?? [];
             foreach ($payload['models'] ?? [] as $entry) {
-                $id = (string) ($entry['name'] ?? '');
+                // `name` is the resource name ("models/gemini-3.6-flash"); the value
+                // generateContent expects is `baseModelId`. Returning the resource
+                // name would build ".../models/models/gemini-3.6-flash:generateContent".
+                // https://ai.google.dev/api/models
+                $id = isset($entry['baseModelId']) && is_string($entry['baseModelId'])
+                    ? $entry['baseModelId']
+                    : self::normaliseModelId((string) ($entry['name'] ?? ''));
                 if ($id === '') {
                     continue;
                 }
