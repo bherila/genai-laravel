@@ -63,7 +63,7 @@ final class FileLimits
         if (is_resource($fileContent)) {
             $stat = @fstat($fileContent);
 
-            return is_array($stat) && isset($stat['size']) && $stat['size'] > 0 ? (int) $stat['size'] : null;
+            return is_array($stat) && $stat['size'] > 0 ? (int) $stat['size'] : null;
         }
 
         return null;

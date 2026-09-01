@@ -115,7 +115,7 @@ final class GenAiRequest
             fn (ContentBlock|array $file) => $file instanceof ContentBlock
                 ? $file
                 : ContentBlock::document($file['base64'], $file['mimeType']),
-            array_values($files),
+            $files,
         );
 
         return $clone;

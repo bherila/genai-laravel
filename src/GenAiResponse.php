@@ -87,7 +87,7 @@ final class GenAiResponse
 
         foreach ($this->toolCalls as $call) {
             $content[] = ContentBlock::toolCall(
-                id: (string) ($call['id'] ?? ''),
+                id: $call['id'],
                 name: $call['name'],
                 input: $call['input'],
             );

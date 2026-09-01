@@ -60,7 +60,7 @@ class GenAiClientFactory
     private static function makeGemini(?GeminiCredentials $credentials): GeminiClient
     {
         $cfg = config('genai.providers.gemini', []);
-        $apiKey = $credentials?->apiKey ?? $cfg['api_key'] ?? '';
+        $apiKey = static::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
 
         if ($apiKey === '') {
             throw new GenAiException('genai.providers.gemini.api_key is not set.');
@@ -68,7 +68,7 @@ class GenAiClientFactory
 
         return new GeminiClient(
             apiKey: $apiKey,
-            model: $credentials?->model ?? $cfg['model'] ?? 'gemini-3.6-flash',
+            model: static::pick($credentials?->model, $cfg['model'] ?? null, 'gemini-3.6-flash'),
             timeout: (int) ($cfg['timeout'] ?? 240),
             responseMimeType: static::nullableStringConfig($cfg['response_mime_type'] ?? 'application/json'),
         );
@@ -77,7 +77,7 @@ class GenAiClientFactory
     private static function makeBedrock(?BedrockCredentials $credentials): BedrockClient
     {
         $cfg = config('genai.providers.bedrock', []);
-        $apiKey = $credentials?->apiKey ?? $cfg['api_key'] ?? '';
+        $apiKey = static::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
 
         if ($apiKey === '') {
             throw new GenAiException('genai.providers.bedrock.api_key is not set.');
@@ -85,9 +85,9 @@ class GenAiClientFactory
 
         return new BedrockClient(
             apiKey: $apiKey,
-            modelId: $credentials?->model ?? $cfg['model'] ?? 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
-            region: $credentials?->region ?? $cfg['region'] ?? 'us-east-1',
-            sessionToken: $credentials?->sessionToken ?? $cfg['session_token'] ?? '',
+            modelId: static::pick($credentials?->model, $cfg['model'] ?? null, 'us.anthropic.claude-haiku-4-5-20251001-v1:0'),
+            region: static::pick($credentials?->region, $cfg['region'] ?? null, 'us-east-1'),
+            sessionToken: static::pick($credentials?->sessionToken, $cfg['session_token'] ?? null, ''),
             timeout: (int) ($cfg['timeout'] ?? 240),
         );
     }
@@ -95,7 +95,7 @@ class GenAiClientFactory
     private static function makeAnthropic(?AnthropicCredentials $credentials): AnthropicClient
     {
         $cfg = config('genai.providers.anthropic', []);
-        $apiKey = $credentials?->apiKey ?? $cfg['api_key'] ?? '';
+        $apiKey = static::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
 
         if ($apiKey === '') {
             throw new GenAiException('genai.providers.anthropic.api_key is not set.');
@@ -103,10 +103,22 @@ class GenAiClientFactory
 
         return new AnthropicClient(
             apiKey: $apiKey,
-            model: $credentials?->model ?? $cfg['model'] ?? 'claude-sonnet-4-6',
+            model: static::pick($credentials?->model, $cfg['model'] ?? null, 'claude-sonnet-4-6'),
             maxTokens: (int) ($cfg['max_tokens'] ?? 8192),
             timeout: (int) ($cfg['timeout'] ?? 240),
         );
+    }
+
+    /**
+     * Supplied credentials win over config, and config over the package default.
+     */
+    private static function pick(?string $supplied, mixed $configured, string $default): string
+    {
+        if ($supplied !== null && $supplied !== '') {
+            return $supplied;
+        }
+
+        return is_string($configured) && $configured !== '' ? $configured : $default;
     }
 
     private static function nullableStringConfig(mixed $value): ?string
