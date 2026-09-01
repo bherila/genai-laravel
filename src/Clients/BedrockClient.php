@@ -198,7 +198,7 @@ class BedrockClient implements GenAiClient
      * Extract tool use blocks from a Bedrock Converse response.
      *
      * @param  array<string, mixed>  $response
-     * @return list<array{name: string, input: array<string, mixed>}>
+     * @return list<array{id: string, name: string, input: array<string, mixed>}>
      */
     public function extractToolCalls(array $response): array
     {
@@ -210,6 +210,8 @@ class BedrockClient implements GenAiClient
                 continue;
             }
             $calls[] = [
+                // Bedrock requires this id back on the toolResult block.
+                'id' => (string) ($block['toolUse']['toolUseId'] ?? ''),
                 'name' => (string) $block['toolUse']['name'],
                 'input' => is_array($block['toolUse']['input']) ? $block['toolUse']['input'] : [],
             ];
@@ -383,6 +385,30 @@ class BedrockClient implements GenAiClient
 
     private function contentBlockToBedrock(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_TOOL_CALL) {
+            return [
+                'toolUse' => [
+                    'toolUseId' => (string) $block->toolCallId,
+                    'name' => (string) $block->toolName,
+                    'input' => ($block->toolInput ?? []) === [] ? (object) [] : $block->toolInput,
+                ],
+            ];
+        }
+
+        if ($block->type === ContentBlock::TYPE_TOOL_RESULT) {
+            $payload = is_array($block->toolResult)
+                ? ['json' => $block->toolResult]
+                : ['text' => $block->toolResultAsText()];
+
+            return [
+                'toolResult' => [
+                    'toolUseId' => (string) $block->toolCallId,
+                    'content' => [$payload],
+                    'status' => $block->isError ? 'error' : 'success',
+                ],
+            ];
+        }
+
         if ($block->type === ContentBlock::TYPE_FILE_REFERENCE) {
             throw new GenAiUnsupportedOperationException(
                 'Bedrock has no File API, so ContentBlock::fileReference() cannot be sent to it. '

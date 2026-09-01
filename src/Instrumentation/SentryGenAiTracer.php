@@ -155,11 +155,25 @@ final class SentryGenAiTracer
             'role' => $message['role'],
             'parts' => array_map(fn (ContentBlock $block) => [
                 'type' => $block->type,
-                'content' => $block->type === 'text'
-                    ? (string) $block->text
-                    : '[document: '.($block->mimeType ?? 'application/octet-stream').']',
+                'content' => self::describeBlock($block),
             ], $message['content']),
         ], $messages);
+    }
+
+    /**
+     * Summarises a block for the trace. File bytes and tool payloads are
+     * described rather than inlined: a span attribute is not the place for a
+     * multi-megabyte base64 blob, and tool arguments often carry user data.
+     */
+    private static function describeBlock(ContentBlock $block): string
+    {
+        return match ($block->type) {
+            ContentBlock::TYPE_TEXT => (string) $block->text,
+            ContentBlock::TYPE_FILE_REFERENCE => '[file: '.($block->mimeType ?? 'application/octet-stream').']',
+            ContentBlock::TYPE_TOOL_CALL => '[tool_call: '.((string) $block->toolName).']',
+            ContentBlock::TYPE_TOOL_RESULT => '[tool_result: '.((string) $block->toolName).($block->isError ? ' (error)' : '').']',
+            default => '[document: '.($block->mimeType ?? 'application/octet-stream').']',
+        };
     }
 
     /** @return list<array{name: string, description: string, input_schema: array<string, mixed>}> */

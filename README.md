@@ -140,8 +140,54 @@ $response = GenAiRequest::with($client)
     ->generate();
 
 $call = $response->toolCallByName('extract_invoice');
-// ['name' => 'extract_invoice', 'input' => ['vendor' => 'Acme', 'amount' => 1500.00, ...]]
+// ['id' => 'toolu_01A…', 'name' => 'extract_invoice', 'input' => ['vendor' => 'Acme', ...]]
 ```
+
+#### Completing the loop
+
+Executing a tool and handing the result back needs three things the response
+alone used to lack: the call's ID, the assistant turn replayed into the history
+(Anthropic and Bedrock both reject a result whose call is not already there),
+and a neutral way to express the result. All three are provider-agnostic:
+
+```php
+$messages = [['role' => 'user', 'content' => [ContentBlock::text($prompt)]]];
+
+$ask = fn () => GenAiRequest::with($client)
+    ->messages($messages)
+    ->tools($toolConfig)
+    ->generate();
+
+$response = $ask();
+
+while ($response->hasToolCalls()) {
+    $messages[] = $response->assistantMessage();
+
+    $results = [];
+    foreach ($response->toolCalls as $call) {
+        $results[] = ContentBlock::toolResultFor($call, $myTools->run($call['name'], $call['input']));
+    }
+
+    $messages[] = ['role' => 'user', 'content' => $results];
+    $response = $ask();
+}
+
+echo $response->text;
+```
+
+`ContentBlock::toolResultFor()` carries both the call ID and the function name,
+because Anthropic and Bedrock correlate results by ID while Gemini correlates by
+name — one message, three wire formats:
+
+| | Call | Result |
+|---|---|---|
+| Anthropic | `tool_use` | `tool_result` + `tool_use_id` |
+| Bedrock | `toolUse` | `toolResult` + `toolUseId` + `status` |
+| Gemini | `functionCall` | `functionResponse` matched by `name` |
+
+A tool that failed is `ContentBlock::toolResultFor($call, $message, isError: true)`,
+which becomes Anthropic's `is_error`, Bedrock's `status: "error"`, or a Gemini
+`{"error": …}` response, so the model can recover instead of hanging.
 
 #### Schema helpers
 
@@ -260,12 +306,13 @@ $response = GenAi::converse($system, $messages, $toolConfig);
 | Property / method | Description |
 |---|---|
 | `->text` | Concatenated text output |
-| `->toolCalls` | `[['name' => '...', 'input' => [...]], ...]` |
+| `->toolCalls` | `[['id' => '...', 'name' => '...', 'input' => [...]], ...]` |
 | `->usage` | Normalised `Usage` (tokens, cache tokens) — see below |
 | `->raw` | Provider-specific raw response array |
 | `->hasToolCalls()` | Whether the model called any tool |
 | `->firstToolCall()` | First tool call, or `null` |
 | `->toolCallByName('fn')` | Named tool call, or `null` |
+| `->assistantMessage()` | This turn as a message to append before tool results |
 
 ### Token usage and cost
 
@@ -478,6 +525,7 @@ formats), so no conversion runs for Bedrock requests.
 | File upload API | ✅ `uploadFile()` | ❌ inline only | ✅ `uploadFile()` |
 | Inline file bytes | ✅ | ✅ | ✅ |
 | Tool/function calling | ✅ | ✅ | ✅ |
+| Tool-result round trip | ✅ (by name) | ✅ (by id) | ✅ (by id) |
 | Max inline file (decoded) | 15 MB | 4.5 MB doc / 3.75 MB image | 24 MB doc / 5 MB image |
 | Max uploaded file | 2 GB | n/a | 500 MB |
 | Documents per message | unlimited | 5 | unlimited |

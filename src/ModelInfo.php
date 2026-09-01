@@ -16,9 +16,9 @@ final class ModelInfo
 {
     /**
      * @param  string  $id  The identifier used to call the model, ready to pass straight
-     *                       back to the provider (e.g. "claude-sonnet-4-5",
-     *                       "anthropic.claude-3-sonnet-20240229-v1:0", "gemini-3.6-flash").
-     *                       Gemini resource names are normalised: the `models/` prefix is stripped.
+     *                      back to the provider (e.g. "claude-sonnet-4-5",
+     *                      "anthropic.claude-3-sonnet-20240229-v1:0", "gemini-3.6-flash").
+     *                      Gemini resource names are normalised: the `models/` prefix is stripped.
      * @param  string  $name  Human-readable display name.
      * @param  string  $provider  The provider identifier ("anthropic", "bedrock", "gemini").
      * @param  string|null  $description  Free-form description when the provider supplies one.

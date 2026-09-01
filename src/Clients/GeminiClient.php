@@ -308,7 +308,7 @@ class GeminiClient implements GenAiClient
      * Extract function/tool calls from a Gemini response.
      *
      * @param  array<string, mixed>  $response
-     * @return list<array{name: string, input: array<string, mixed>}>
+     * @return list<array{id: string, name: string, input: array<string, mixed>}>
      */
     public function extractToolCalls(array $response): array
     {
@@ -328,6 +328,9 @@ class GeminiClient implements GenAiClient
                 continue;
             }
             $calls[] = [
+                // Gemini correlates a functionResponse by name, not by id — it
+                // only sends an id for parallel calls, so this is often ''.
+                'id' => is_string($fn['id'] ?? null) ? $fn['id'] : '',
                 'name' => (string) $fn['name'],
                 'input' => is_array($fn['args'] ?? null) ? $fn['args'] : [],
             ];
@@ -517,6 +520,39 @@ class GeminiClient implements GenAiClient
 
     private function contentBlockToGeminiPart(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_TOOL_CALL) {
+            $call = [
+                'name' => (string) $block->toolName,
+                'args' => ($block->toolInput ?? []) === [] ? (object) [] : $block->toolInput,
+            ];
+            if ((string) $block->toolCallId !== '') {
+                $call['id'] = (string) $block->toolCallId;
+            }
+
+            return ['functionCall' => $call];
+        }
+
+        if ($block->type === ContentBlock::TYPE_TOOL_RESULT) {
+            if ((string) $block->toolName === '') {
+                throw new GenAiFatalException(
+                    'Gemini matches a tool result to its call by function name, not by id, so a '
+                    .'tool_result block needs one. Build it with ContentBlock::toolResultFor($call, …) '
+                    .'or pass toolName: to ContentBlock::toolResult().'
+                );
+            }
+
+            $response = [
+                'name' => (string) $block->toolName,
+                // functionResponse.response must be a JSON object, never a scalar.
+                'response' => $block->toolResultAsArray() === [] ? (object) [] : $block->toolResultAsArray(),
+            ];
+            if ((string) $block->toolCallId !== '') {
+                $response['id'] = (string) $block->toolCallId;
+            }
+
+            return ['functionResponse' => $response];
+        }
+
         if ($block->type === ContentBlock::TYPE_FILE_REFERENCE) {
             $mime = (string) $block->mimeType;
             $this->assertSupportedDocumentMimeType($mime);

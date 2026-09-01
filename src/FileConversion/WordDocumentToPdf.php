@@ -5,6 +5,8 @@ namespace Bherila\GenAiLaravel\FileConversion;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\FileLimits;
+use Dompdf\Dompdf;
+use Mpdf\Mpdf;
 use PhpOffice\PhpWord\IOFactory;
 use PhpOffice\PhpWord\Settings;
 
@@ -55,13 +57,13 @@ final class WordDocumentToPdf
     }
 
     /**
-     * @return array{0: string, 1: string}|null  [rendererName, rendererClass]
+     * @return array{0: string, 1: string}|null [rendererName, rendererClass]
      */
     private static function detectPdfRenderer(): ?array
     {
         $candidates = [
-            [Settings::PDF_RENDERER_DOMPDF, \Dompdf\Dompdf::class],
-            [Settings::PDF_RENDERER_MPDF, \Mpdf\Mpdf::class],
+            [Settings::PDF_RENDERER_DOMPDF, Dompdf::class],
+            [Settings::PDF_RENDERER_MPDF, Mpdf::class],
             [Settings::PDF_RENDERER_TCPDF, \TCPDF::class],
         ];
         foreach ($candidates as $entry) {

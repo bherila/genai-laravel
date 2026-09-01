@@ -65,7 +65,7 @@ interface GenAiClient
      * @param  string  $system  System prompt text (empty string to omit).
      * @param  list<array{role: string, content: list<ContentBlock>}>  $messages
      * @param  ToolConfig|null  $toolConfig  Tool definitions and calling strategy.
-     * @return array<string, mixed>  Raw provider response array.
+     * @return array<string, mixed> Raw provider response array.
      */
     public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array;
 
@@ -81,7 +81,7 @@ interface GenAiClient
      * Upload a file to the provider's File API and return a reference URI/ID.
      *
      * @param  resource|string  $fileContent
-     * @return string  Provider file URI/ID.
+     * @return string Provider file URI/ID.
      *
      * @throws GenAiUnsupportedOperationException When the provider has no File API.
      * @throws GenAiUploadException When the provider rejected or failed the upload.
@@ -122,8 +122,14 @@ interface GenAiClient
     /**
      * Extract tool/function call results from a raw provider response.
      *
+     * `id` is the provider's call identifier, which Anthropic and Bedrock both
+     * require back on the matching tool-result block. Gemini correlates results
+     * by function name instead and usually sends no id, so it can be an empty
+     * string — build results with ContentBlock::toolResultFor(), which carries
+     * both and stays portable.
+     *
      * @param  array<string, mixed>  $response
-     * @return list<array{name: string, input: array<string, mixed>}>
+     * @return list<array{id: string, name: string, input: array<string, mixed>}>
      */
     public function extractToolCalls(array $response): array;
 

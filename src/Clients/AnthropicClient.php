@@ -395,7 +395,7 @@ class AnthropicClient implements GenAiClient
      * Extract tool_use blocks from an Anthropic Messages API response.
      *
      * @param  array<string, mixed>  $response
-     * @return list<array{name: string, input: array<string, mixed>}>
+     * @return list<array{id: string, name: string, input: array<string, mixed>}>
      */
     public function extractToolCalls(array $response): array
     {
@@ -405,6 +405,9 @@ class AnthropicClient implements GenAiClient
                 continue;
             }
             $calls[] = [
+                // Anthropic requires this id back on the tool_result block;
+                // dropping it made the loop impossible to close.
+                'id' => (string) ($block['id'] ?? ''),
                 'name' => (string) ($block['name'] ?? ''),
                 'input' => is_array($block['input'] ?? null) ? $block['input'] : [],
             ];
@@ -515,6 +518,29 @@ class AnthropicClient implements GenAiClient
 
     private function contentBlockToAnthropic(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_TOOL_CALL) {
+            return [
+                'type' => 'tool_use',
+                'id' => (string) $block->toolCallId,
+                'name' => (string) $block->toolName,
+                // An empty input must encode as {} — [] would be a JSON array.
+                'input' => ($block->toolInput ?? []) === [] ? (object) [] : $block->toolInput,
+            ];
+        }
+
+        if ($block->type === ContentBlock::TYPE_TOOL_RESULT) {
+            $result = [
+                'type' => 'tool_result',
+                'tool_use_id' => (string) $block->toolCallId,
+                'content' => $block->toolResultAsText(),
+            ];
+            if ($block->isError) {
+                $result['is_error'] = true;
+            }
+
+            return $result;
+        }
+
         if ($block->type === ContentBlock::TYPE_FILE_REFERENCE) {
             $mime = (string) $block->mimeType;
             $source = ['type' => 'file', 'file_id' => (string) $block->fileRef];

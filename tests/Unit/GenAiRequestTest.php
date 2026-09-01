@@ -2,6 +2,7 @@
 
 namespace Bherila\GenAiLaravel\Tests\Unit;
 
+use Bherila\GenAiLaravel\Clients\AnthropicClient;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\GenAiRequest;
 use Bherila\GenAiLaravel\GenAiResponse;
@@ -31,9 +32,9 @@ class GenAiRequestTest extends TestCase
         ];
     }
 
-    private function makeAnthropicClient(): \Bherila\GenAiLaravel\Clients\AnthropicClient
+    private function makeAnthropicClient(): AnthropicClient
     {
-        return new \Bherila\GenAiLaravel\Clients\AnthropicClient(
+        return new AnthropicClient(
             apiKey: 'test-key',
             model: 'claude-sonnet-4-6',
         );
