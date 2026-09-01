@@ -57,8 +57,9 @@ return [
         |--------------------------------------------------------------------------
         */
         'gemini' => [
-            // API key. Per-user keys can be set dynamically via GenAiClientFactory::make()
-            // with a custom key override; this is the site-wide fallback.
+            // Site-wide API key. For per-user or per-tenant keys, pass credentials
+            // to the factory instead of relying on config:
+            //   GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: $key))
             'api_key' => env('GEMINI_API_KEY'),
 
             // Model ID. Pin this explicitly in your own .env: Google retires Gemini

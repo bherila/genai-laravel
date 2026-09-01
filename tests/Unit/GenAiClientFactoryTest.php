@@ -5,8 +5,14 @@ namespace Bherila\GenAiLaravel\Tests\Unit;
 use Bherila\GenAiLaravel\Clients\BedrockClient;
 use Bherila\GenAiLaravel\Clients\GeminiClient;
 use Bherila\GenAiLaravel\Clients\GenAiClientFactory;
+use Bherila\GenAiLaravel\ContentBlock;
+use Bherila\GenAiLaravel\Credentials\AnthropicCredentials;
+use Bherila\GenAiLaravel\Credentials\BedrockCredentials;
+use Bherila\GenAiLaravel\Credentials\GeminiCredentials;
 use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\GenAiServiceProvider;
+use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Http;
 use Orchestra\Testbench\TestCase;
 
 class GenAiClientFactoryTest extends TestCase
@@ -75,6 +81,73 @@ class GenAiClientFactoryTest extends TestCase
         $this->expectException(GenAiException::class);
         $this->expectExceptionMessageMatches('/api_key is not set/');
         GenAiClientFactory::make('bedrock');
+    }
+
+    // ── per-request credentials ──────────────────────────────────────────────
+
+    public function test_credentials_override_the_configured_key(): void
+    {
+        config(['genai.default' => 'gemini', 'genai.providers.gemini.api_key' => 'site-wide-key']);
+
+        Http::fake(['*' => Http::response(['candidates' => []])]);
+
+        GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: 'per-user-key'))
+            ->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        Http::assertSent(fn (Request $req) => $req->header('x-goog-api-key')[0] === 'per-user-key');
+    }
+
+    public function test_credentials_alone_select_the_provider(): void
+    {
+        config(['genai.default' => 'gemini']);
+
+        $client = GenAiClientFactory::make(credentials: new AnthropicCredentials(apiKey: 'k'));
+
+        $this->assertSame('anthropic', $client->provider());
+    }
+
+    public function test_credentials_can_override_the_model(): void
+    {
+        config(['genai.providers.bedrock.api_key' => 'site', 'genai.providers.bedrock.model' => 'configured-model']);
+
+        $client = GenAiClientFactory::make(credentials: new BedrockCredentials(
+            apiKey: 'tenant-token',
+            region: 'eu-west-1',
+            model: 'eu.anthropic.claude-haiku-4-5-20251001-v1:0',
+        ));
+
+        $this->assertSame('eu.anthropic.claude-haiku-4-5-20251001-v1:0', $client->model());
+    }
+
+    public function test_credentials_leave_unset_values_to_config(): void
+    {
+        config([
+            'genai.providers.gemini.api_key' => 'site',
+            'genai.providers.gemini.model' => 'gemini-3.5-flash',
+        ]);
+
+        $client = GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: 'tenant'));
+
+        $this->assertSame('gemini-3.5-flash', $client->model());
+    }
+
+    public function test_credentials_that_do_not_match_the_requested_provider_are_rejected(): void
+    {
+        config(['genai.providers.bedrock.api_key' => 'k']);
+
+        $this->expectException(GenAiException::class);
+        $this->expectExceptionMessageMatches('/which is for "gemini"/');
+
+        GenAiClientFactory::make('bedrock', new GeminiCredentials(apiKey: 'k'));
+    }
+
+    public function test_credentials_work_without_any_configured_key(): void
+    {
+        config(['genai.providers.anthropic.api_key' => null]);
+
+        $client = GenAiClientFactory::make(credentials: new AnthropicCredentials(apiKey: 'tenant-key'));
+
+        $this->assertSame('anthropic', $client->provider());
     }
 
     /**

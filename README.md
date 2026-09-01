@@ -293,10 +293,46 @@ class MyService
 
 ### Facade
 
+The `GenAi` facade resolves whatever is bound to the `GenAiClient` contract, so
+it fits an application on a single provider. There is no `GenAi::client('…')`:
+picking a provider per call is `GenAiClientFactory::make()`'s job.
+
 ```php
 use Bherila\GenAiLaravel\Facades\GenAi;
 
-$response = GenAi::converse($system, $messages, $toolConfig);
+$raw = GenAi::converse($system, $messages, $toolConfig);   // $system is a string
+$text = GenAi::extractText($raw);
+$usage = GenAi::extractUsage($raw);
+```
+
+### Per-request credentials
+
+When a key belongs to a tenant or a user rather than to the deployment, pass it
+to the factory. The provider is inferred from the credential type, and anything
+you leave unset still comes from `genai.providers.*`:
+
+```php
+use Bherila\GenAiLaravel\Clients\GenAiClientFactory;
+use Bherila\GenAiLaravel\Credentials\AnthropicCredentials;
+use Bherila\GenAiLaravel\Credentials\BedrockCredentials;
+use Bherila\GenAiLaravel\Credentials\GeminiCredentials;
+
+$client = GenAiClientFactory::make(
+    credentials: new GeminiCredentials(apiKey: $user->gemini_key),
+);
+
+// Region and model travel with the credentials where they need to:
+$client = GenAiClientFactory::make(
+    credentials: new BedrockCredentials(
+        apiKey: $tenant->bedrock_token,
+        region: $tenant->aws_region,
+        model: $tenant->bedrock_model,
+    ),
+);
+
+$client = GenAiClientFactory::make(
+    credentials: new AnthropicCredentials(apiKey: $tenant->anthropic_key),
+);
 ```
 
 ## GenAiResponse
@@ -375,7 +411,7 @@ Every client implements `listModels(): ModelInfo[]`, hitting each provider's
 catalog endpoint and normalising the result:
 
 ```php
-$client = GenAi::client('anthropic'); // or 'bedrock', 'gemini'
+$client = GenAiClientFactory::make('anthropic'); // or 'bedrock', 'gemini'
 
 foreach ($client->listModels() as $model) {
     $model->id;                          // call-ready identifier
@@ -513,7 +549,7 @@ Converse API lists `pdf, csv, doc, docx, xls, xlsx, html, txt, md` as native
 formats), so no conversion runs for Bedrock requests.
 
 > **Note:** PowerPoint (`.ppt`, `.pptx`, `.odp`) auto-conversion is not
-> included in this PR — the only available PHP library (`phpoffice/phppresentation`)
+> currently supported — the only available PHP library (`phpoffice/phppresentation`)
 > pins an older `phpoffice/phpspreadsheet` version that currently has open
 > security advisories. Until that's resolved upstream, convert PowerPoint files
 > to PDF yourself (e.g. via `libreoffice --convert-to pdf`) before sending them.
@@ -537,6 +573,32 @@ formats), so no conversion runs for Bedrock requests.
 | Office-format documents | auto-convert 📄📊 | ✅ native | auto-convert 📄📊 |
 | Auto DOC/DOCX → PDF (with phpword + dompdf) | ✅ | n/a | ✅ |
 | Auto XLSX/XLS/ODS/CSV → text (with phpspreadsheet) | ✅ | n/a | ✅ |
+
+## Upgrading from 0.1.0
+
+The provider-drift fixes changed a few public signatures. All of them are
+compile-time visible — nothing changes behaviour silently.
+
+| Before | Now |
+|---|---|
+| `$client::maxFileBytes()` | `$client::maxInlineFileBytes($mime)`, `::maxUploadedFileBytes()`, `::maxFilesPerMessage()` |
+| `uploadFile()` returned `?string` | returns `string`; throws `GenAiUnsupportedOperationException` / `GenAiUploadException` / `GenAiFileTooLargeException` |
+| `converseWithFileRef()` threw `\LogicException` on Bedrock | throws `GenAiUnsupportedOperationException` (a `GenAiException`) |
+| `$response->toolCalls[n]` had `name`, `input` | also has `id` |
+| `GenAi::client('anthropic')` (never existed) | `GenAiClientFactory::make('anthropic')` |
+
+Also worth knowing:
+
+- Oversized files now raise `GenAiFileTooLargeException` locally instead of
+  reaching the provider. If you were relying on a provider 400, catch this instead.
+- `ToolChoice::none()` on Bedrock now suppresses the tool definitions as well as
+  the choice, so the model can no longer call a tool you asked it not to.
+- Anthropic `text/plain` documents are sent as a text source, and the base64 you
+  pass must actually decode — invalid input now fails loudly.
+- The Gemini catalog returns bare model IDs (`gemini-3.6-flash`), not resource
+  names (`models/gemini-3.6-flash`). Stored IDs from the old shape still work:
+  the client strips the prefix.
+- Requires PHP 8.4 and Laravel 13.
 
 ## License
 
