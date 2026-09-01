@@ -345,6 +345,29 @@ class AnthropicClient implements GenAiClient
         if ($block->type === 'document') {
             $mime = (string) $block->mimeType;
 
+            // Plain text uses a `text` source carrying the decoded content —
+            // only PDFs go through the base64 source. Sending base64 under a
+            // `text/plain` media type is silently accepted-then-misread.
+            // https://platform.claude.com/docs/en/build-with-claude/citations
+            if ($mime === 'text/plain') {
+                $decoded = base64_decode((string) $block->base64, true);
+                if ($decoded === false) {
+                    throw new GenAiFatalException(
+                        'Anthropic text/plain document block: content is not valid base64. '
+                        .'ContentBlock::document() expects base64-encoded bytes.'
+                    );
+                }
+
+                return [
+                    'type' => 'document',
+                    'source' => [
+                        'type' => 'text',
+                        'media_type' => 'text/plain',
+                        'data' => $decoded,
+                    ],
+                ];
+            }
+
             if (self::isSupportedDocumentMimeType($mime)) {
                 return [
                     'type' => 'document',

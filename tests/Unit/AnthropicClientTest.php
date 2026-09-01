@@ -251,6 +251,58 @@ class AnthropicClientTest extends TestCase
         });
     }
 
+    public function test_converse_with_inline_text_file_sends_a_text_source_not_base64(): void
+    {
+        Http::fake(['*' => Http::response($this->fakeTextResponse())]);
+
+        $plain = "Line one\nLine two\n";
+        $this->makeClient()->converseWithInlineFile(base64_encode($plain), 'text/plain', 'Summarize.');
+
+        Http::assertSent(function (Request $req) use ($plain) {
+            $content = $req->data()['messages'][0]['content'] ?? [];
+            foreach ($content as $block) {
+                if (($block['type'] ?? '') !== 'document') {
+                    continue;
+                }
+
+                return ($block['source']['type'] ?? '') === 'text'
+                    && ($block['source']['media_type'] ?? '') === 'text/plain'
+                    && ($block['source']['data'] ?? '') === $plain;
+            }
+
+            return false;
+        });
+    }
+
+    public function test_text_document_block_never_sends_a_base64_source(): void
+    {
+        Http::fake(['*' => Http::response($this->fakeTextResponse())]);
+
+        $base64 = base64_encode('some notes');
+        $this->makeClient()->converse('', [[
+            'role' => 'user',
+            'content' => [ContentBlock::document($base64, 'text/plain')],
+        ]]);
+
+        Http::assertSent(function (Request $req) use ($base64) {
+            $raw = $req->body();
+
+            return ! str_contains($raw, '"base64"') && ! str_contains($raw, $base64);
+        });
+    }
+
+    public function test_text_document_block_rejects_content_that_is_not_base64(): void
+    {
+        Http::fake(['*' => Http::response($this->fakeTextResponse())]);
+
+        $this->expectException(GenAiFatalException::class);
+
+        $this->makeClient()->converse('', [[
+            'role' => 'user',
+            'content' => [ContentBlock::document('not base64 !!!', 'text/plain')],
+        ]]);
+    }
+
     // ── extractText ───────────────────────────────────────────────────────────
 
     public function test_extract_text_returns_concatenated_text_blocks(): void
