@@ -50,9 +50,9 @@ class GenAiClientFactory
         }
 
         return match ($provider) {
-            'gemini' => static::makeGemini($credentials instanceof GeminiCredentials ? $credentials : null),
-            'bedrock' => static::makeBedrock($credentials instanceof BedrockCredentials ? $credentials : null),
-            'anthropic' => static::makeAnthropic($credentials instanceof AnthropicCredentials ? $credentials : null),
+            'gemini' => self::makeGemini($credentials instanceof GeminiCredentials ? $credentials : null),
+            'bedrock' => self::makeBedrock($credentials instanceof BedrockCredentials ? $credentials : null),
+            'anthropic' => self::makeAnthropic($credentials instanceof AnthropicCredentials ? $credentials : null),
             default => throw new GenAiException("Unknown GenAI provider: {$provider}"),
         };
     }
@@ -60,7 +60,7 @@ class GenAiClientFactory
     private static function makeGemini(?GeminiCredentials $credentials): GeminiClient
     {
         $cfg = config('genai.providers.gemini', []);
-        $apiKey = static::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
+        $apiKey = self::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
 
         if ($apiKey === '') {
             throw new GenAiException('genai.providers.gemini.api_key is not set.');
@@ -68,16 +68,16 @@ class GenAiClientFactory
 
         return new GeminiClient(
             apiKey: $apiKey,
-            model: static::pick($credentials?->model, $cfg['model'] ?? null, 'gemini-3.6-flash'),
+            model: self::pick($credentials?->model, $cfg['model'] ?? null, 'gemini-3.6-flash'),
             timeout: (int) ($cfg['timeout'] ?? 240),
-            responseMimeType: static::nullableStringConfig($cfg['response_mime_type'] ?? 'application/json'),
+            responseMimeType: self::nullableStringConfig($cfg['response_mime_type'] ?? 'application/json'),
         );
     }
 
     private static function makeBedrock(?BedrockCredentials $credentials): BedrockClient
     {
         $cfg = config('genai.providers.bedrock', []);
-        $apiKey = static::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
+        $apiKey = self::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
 
         if ($apiKey === '') {
             throw new GenAiException('genai.providers.bedrock.api_key is not set.');
@@ -85,9 +85,9 @@ class GenAiClientFactory
 
         return new BedrockClient(
             apiKey: $apiKey,
-            modelId: static::pick($credentials?->model, $cfg['model'] ?? null, 'us.anthropic.claude-haiku-4-5-20251001-v1:0'),
-            region: static::pick($credentials?->region, $cfg['region'] ?? null, 'us-east-1'),
-            sessionToken: static::pick($credentials?->sessionToken, $cfg['session_token'] ?? null, ''),
+            modelId: self::pick($credentials?->model, $cfg['model'] ?? null, 'us.anthropic.claude-haiku-4-5-20251001-v1:0'),
+            region: self::pick($credentials?->region, $cfg['region'] ?? null, 'us-east-1'),
+            sessionToken: self::pick($credentials?->sessionToken, $cfg['session_token'] ?? null, ''),
             timeout: (int) ($cfg['timeout'] ?? 240),
         );
     }
@@ -95,7 +95,7 @@ class GenAiClientFactory
     private static function makeAnthropic(?AnthropicCredentials $credentials): AnthropicClient
     {
         $cfg = config('genai.providers.anthropic', []);
-        $apiKey = static::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
+        $apiKey = self::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
 
         if ($apiKey === '') {
             throw new GenAiException('genai.providers.anthropic.api_key is not set.');
@@ -103,7 +103,7 @@ class GenAiClientFactory
 
         return new AnthropicClient(
             apiKey: $apiKey,
-            model: static::pick($credentials?->model, $cfg['model'] ?? null, 'claude-sonnet-4-6'),
+            model: self::pick($credentials?->model, $cfg['model'] ?? null, 'claude-sonnet-4-6'),
             maxTokens: (int) ($cfg['max_tokens'] ?? 8192),
             timeout: (int) ($cfg['timeout'] ?? 240),
         );

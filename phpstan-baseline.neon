@@ -85,30 +85,6 @@ parameters:
 			path: src/Clients/GeminiClient.php
 
 		-
-			message: '#^Unsafe call to private method Bherila\\GenAiLaravel\\Clients\\GenAiClientFactory\:\:makeAnthropic\(\) through static\:\:\.$#'
-			identifier: staticClassAccess.privateMethod
-			count: 1
-			path: src/Clients/GenAiClientFactory.php
-
-		-
-			message: '#^Unsafe call to private method Bherila\\GenAiLaravel\\Clients\\GenAiClientFactory\:\:makeBedrock\(\) through static\:\:\.$#'
-			identifier: staticClassAccess.privateMethod
-			count: 1
-			path: src/Clients/GenAiClientFactory.php
-
-		-
-			message: '#^Unsafe call to private method Bherila\\GenAiLaravel\\Clients\\GenAiClientFactory\:\:makeGemini\(\) through static\:\:\.$#'
-			identifier: staticClassAccess.privateMethod
-			count: 1
-			path: src/Clients/GenAiClientFactory.php
-
-		-
-			message: '#^Unsafe call to private method Bherila\\GenAiLaravel\\Clients\\GenAiClientFactory\:\:nullableStringConfig\(\) through static\:\:\.$#'
-			identifier: staticClassAccess.privateMethod
-			count: 1
-			path: src/Clients/GenAiClientFactory.php
-
-		-
 			message: '#^Class Mpdf\\Mpdf not found\.$#'
 			identifier: class.notFound
 			count: 1
