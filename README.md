@@ -36,19 +36,27 @@ GENAI_PROVIDER=gemini
 
 # Gemini
 GEMINI_API_KEY=your-key
-GEMINI_MODEL=gemini-2.0-flash
+GEMINI_MODEL=gemini-3.6-flash
 
 # Bedrock — uses Bearer-token auth, not AWS SigV4
 BEDROCK_API_KEY=your-bedrock-bearer-token
 BEDROCK_SESSION_TOKEN=   # optional, for temporary credentials
 BEDROCK_REGION=us-east-1
-BEDROCK_MODEL=us.anthropic.claude-haiku-4-20250514-v1:0
+BEDROCK_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0
 
 # Anthropic
 ANTHROPIC_API_KEY=your-key
 ANTHROPIC_MODEL=claude-sonnet-4-6
 ANTHROPIC_MAX_TOKENS=8192
 ```
+
+> **Pin your model IDs.** The defaults above track the models that were current
+> when the release was cut — Google retires Gemini models on a
+> [published schedule](https://ai.google.dev/gemini-api/docs/deprecations), and the
+> right Bedrock prefix depends on your region and data-residency requirements
+> (`anthropic.` in-region, `us.` / `eu.` / `apac.` / `global.` for cross-region
+> inference profiles). Set `GEMINI_MODEL` / `BEDROCK_MODEL` / `ANTHROPIC_MODEL`
+> explicitly in every environment you deploy.
 
 > **Bedrock auth:** this package authenticates against Bedrock with a bearer
 > token (`Authorization: Bearer …`), not AWS SigV4. `BEDROCK_API_KEY` is the
@@ -321,10 +329,10 @@ $book = PricingBook::fromArray([
         'claude-sonnet-4-6' => ['input' => 3.0, 'output' => 15.0, 'cache_read' => 0.3, 'cache_creation' => 3.75],
     ],
     'bedrock' => [
-        'us.anthropic.claude-haiku-4-20250514-v1:0' => ['input' => 0.8, 'output' => 4.0],
+        'us.anthropic.claude-haiku-4-5-20251001-v1:0' => ['input' => 0.8, 'output' => 4.0],
     ],
     'gemini' => [
-        'gemini-2.0-flash' => ['input' => 0.1, 'output' => 0.4],
+        'gemini-3.6-flash' => ['input' => 0.1, 'output' => 0.4],
     ],
 ]);
 

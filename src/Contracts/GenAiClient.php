@@ -25,7 +25,7 @@ interface GenAiClient
     public function provider(): string;
 
     /**
-     * The model identifier in use (e.g. "claude-sonnet-4-6", "gemini-2.0-flash").
+     * The model identifier in use (e.g. "claude-sonnet-4-6", "gemini-3.6-flash").
      * Used for logging and audit records so callers do not need to read provider config.
      */
     public function model(): string;

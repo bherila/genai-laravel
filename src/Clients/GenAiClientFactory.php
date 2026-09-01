@@ -41,7 +41,7 @@ class GenAiClientFactory
 
         return new GeminiClient(
             apiKey: $apiKey,
-            model: $cfg['model'] ?? 'gemini-2.0-flash',
+            model: $cfg['model'] ?? 'gemini-3.6-flash',
             timeout: (int) ($cfg['timeout'] ?? 240),
             responseMimeType: static::nullableStringConfig($cfg['response_mime_type'] ?? 'application/json'),
         );
@@ -58,7 +58,7 @@ class GenAiClientFactory
 
         return new BedrockClient(
             apiKey: $apiKey,
-            modelId: $cfg['model'] ?? 'us.anthropic.claude-haiku-4-20250514-v1:0',
+            modelId: $cfg['model'] ?? 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
             region: $cfg['region'] ?? 'us-east-1',
             sessionToken: $cfg['session_token'] ?? '',
             timeout: (int) ($cfg['timeout'] ?? 240),

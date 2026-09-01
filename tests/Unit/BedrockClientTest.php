@@ -20,7 +20,7 @@ class BedrockClientTest extends TestCase
     {
         return new BedrockClient(
             apiKey: 'test-key',
-            modelId: 'us.anthropic.claude-haiku-4-20250514-v1:0',
+            modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
             region: 'us-east-1',
         );
     }
@@ -41,7 +41,7 @@ class BedrockClientTest extends TestCase
     {
         $client = new BedrockClient(
             apiKey: 'test-key',
-            modelId: 'us.anthropic.claude-haiku-4-20250514-v1:0',
+            modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
             region: 'us-east-1',
             timeout: 360,
         );

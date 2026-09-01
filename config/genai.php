@@ -42,10 +42,10 @@ return [
         //     'claude-sonnet-4-6' => ['input' => 3.0, 'output' => 15.0],
         // ],
         // 'bedrock' => [
-        //     'us.anthropic.claude-haiku-4-20250514-v1:0' => ['input' => 0.8, 'output' => 4.0],
+        //     'us.anthropic.claude-haiku-4-5-20251001-v1:0' => ['input' => 0.8, 'output' => 4.0],
         // ],
         // 'gemini' => [
-        //     'gemini-2.0-flash' => ['input' => 0.1, 'output' => 0.4],
+        //     'gemini-3.6-flash' => ['input' => 0.1, 'output' => 0.4],
         // ],
     ],
 
@@ -61,8 +61,12 @@ return [
             // with a custom key override; this is the site-wide fallback.
             'api_key' => env('GEMINI_API_KEY'),
 
-            // Model ID. See https://ai.google.dev/gemini-api/docs/models/gemini
-            'model' => env('GEMINI_MODEL', 'gemini-2.0-flash'),
+            // Model ID. Pin this explicitly in your own .env: Google retires Gemini
+            // models on a published schedule, and a package default can only ever
+            // track the model that was current when the release was cut.
+            // See https://ai.google.dev/gemini-api/docs/models/gemini and
+            // https://ai.google.dev/gemini-api/docs/deprecations
+            'model' => env('GEMINI_MODEL', 'gemini-3.6-flash'),
 
             // HTTP timeout in seconds for long-running inference calls.
             'timeout' => (int) env('GEMINI_TIMEOUT', 240),
@@ -108,8 +112,13 @@ return [
             // AWS region.
             'region' => env('BEDROCK_REGION', 'us-east-1'),
 
-            // Bedrock model ID or inference profile ARN.
-            'model' => env('BEDROCK_MODEL', 'us.anthropic.claude-haiku-4-20250514-v1:0'),
+            // Bedrock model ID or inference profile ARN. The default is the US
+            // cross-region inference profile for Claude Haiku 4.5; other regions
+            // and data-residency requirements need a different prefix
+            // (`anthropic.` for in-region, `eu.` / `apac.` / `global.` otherwise),
+            // so pin BEDROCK_MODEL explicitly rather than relying on this default.
+            // https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-4-5.html
+            'model' => env('BEDROCK_MODEL', 'us.anthropic.claude-haiku-4-5-20251001-v1:0'),
 
             // HTTP timeout in seconds for long-running inference calls.
             'timeout' => (int) env('BEDROCK_TIMEOUT', 240),

@@ -31,7 +31,7 @@ use Illuminate\Support\Facades\Http;
  *   api_key        — Bearer token used for the Authorization header
  *   session_token  — optional; sent as X-Amz-Security-Token header
  *   region         — AWS region, e.g. "us-east-1" (default: "us-east-1")
- *   model          — model ID, e.g. "us.anthropic.claude-haiku-4-20250514-v1:0"
+ *   model          — model ID, e.g. "us.anthropic.claude-haiku-4-5-20251001-v1:0"
  *   timeout        — HTTP timeout in seconds (default: 240)
  */
 class BedrockClient implements GenAiClient

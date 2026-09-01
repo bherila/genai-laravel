@@ -137,9 +137,9 @@ class ListModelsTest extends TestCase
             'https://bedrock.us-east-1.amazonaws.com/inference-profiles' => Http::response([
                 'inferenceProfileSummaries' => [
                     [
-                        'inferenceProfileId' => 'us.anthropic.claude-haiku-4-20250514-v1:0',
+                        'inferenceProfileId' => 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
                         'inferenceProfileName' => 'Cross-region Anthropic Claude Haiku 4',
-                        'inferenceProfileArn' => 'arn:aws:bedrock:us-east-1::inference-profile/us.anthropic.claude-haiku-4-20250514-v1:0',
+                        'inferenceProfileArn' => 'arn:aws:bedrock:us-east-1::inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
                         'type' => 'SYSTEM_DEFINED',
                         'status' => 'ACTIVE',
                         'description' => 'Routes across US regions',
@@ -151,7 +151,7 @@ class ListModelsTest extends TestCase
         $models = (new BedrockClient(apiKey: 'test', modelId: 'any'))->listModels();
 
         $this->assertCount(1, $models);
-        $this->assertSame('us.anthropic.claude-haiku-4-20250514-v1:0', $models[0]->id);
+        $this->assertSame('us.anthropic.claude-haiku-4-5-20251001-v1:0', $models[0]->id);
         $this->assertSame('Cross-region Anthropic Claude Haiku 4', $models[0]->name);
         $this->assertSame('bedrock', $models[0]->provider);
         $this->assertSame('Routes across US regions', $models[0]->description);

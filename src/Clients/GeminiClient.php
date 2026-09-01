@@ -28,7 +28,7 @@ use Illuminate\Support\Facades\Log;
  *
  * Config keys (all under genai.providers.gemini):
  *   api_key  — required; may be per-user or site-wide
- *   model    — e.g. "gemini-2.0-flash" (default: "gemini-2.0-flash")
+ *   model    — e.g. "gemini-3.6-flash" (default: "gemini-3.6-flash")
  *   timeout  — HTTP timeout in seconds (default: 240)
  *   response_mime_type — optional generation response MIME type; null disables MIME forcing
  */
@@ -50,7 +50,7 @@ class GeminiClient implements GenAiClient
 
     public function __construct(
         string $apiKey,
-        string $model = 'gemini-2.0-flash',
+        string $model = 'gemini-3.6-flash',
         int $timeout = 240,
         ?RetryStrategy $retry = null,
         ?string $responseMimeType = 'application/json',
