@@ -531,13 +531,21 @@ three separate questions rather than one number:
 ```php
 $client::maxInlineFileBytes('application/pdf'); // decoded bytes for one inline block
 $client::maxUploadedFileBytes();                // decoded bytes via the File API, null when there is none
-$client::maxFilesPerMessage();                  // document blocks per message, null when uncapped
+$client::maxInlineBlocksPerMessage($mime);      // blocks of that kind per message, null when uncapped
+$client::maxRequestBytes();                    // whole serialized request, null when uncapped
 $client::supportsFileApi();                     // whether uploadFile() will work at all
 ```
 
-Every limit is expressed in **decoded** bytes. Clients enforce them before a
-request leaves the process and throw `GenAiFileTooLargeException` — carrying
-`$actualBytes` and `$limitBytes` — so an oversized file costs no round trip.
+Per-file limits are expressed in **decoded** bytes; `maxRequestBytes()` measures
+the finished serialized payload, because a file can sit under its own limit and
+still leave no room for the prompt, the tools or the history — and several files
+can each pass independently while their sum does not. Clients enforce both before
+a request leaves the process and throw `GenAiFileTooLargeException` — carrying
+`$actualBytes` and `$limitBytes` — so an oversized request costs no round trip.
+
+One gap worth knowing: `uploadFile()` can only preflight a stream whose size
+`fstat()` reports. A non-seekable stream is sent unchecked and the provider
+decides.
 
 Office conversion is bounded too. `SpreadsheetToText` and `WordDocumentToPdf`
 accept an optional `ConversionLimits` capping input size, output size, rows,
@@ -575,7 +583,8 @@ formats), so no conversion runs for Bedrock requests.
 | Tool-result round trip | ✅ (by name) | ✅ (by id) | ✅ (by id) |
 | Max inline file (decoded) | 15 MB | 4.5 MB doc / 3.75 MB image | 24 MB doc / 5 MB image |
 | Max uploaded file | 2 GB | n/a | 500 MB |
-| Documents per message | unlimited | 5 | unlimited |
+| Blocks per message | unlimited | 5 documents / 20 images | unlimited |
+| Whole-request ceiling | 20 MB (package policy) | — | 32 MB |
 | System prompts | ✅ | ✅ | ✅ |
 | `listModels()` | ✅ | ✅ (control-plane) | ✅ |
 | `checkCredentials()` | ✅ | ✅ | ✅ |
@@ -592,7 +601,7 @@ compile-time visible — nothing changes behaviour silently.
 
 | Before | Now |
 |---|---|
-| `$client::maxFileBytes()` | `$client::maxInlineFileBytes($mime)`, `::maxUploadedFileBytes()`, `::maxFilesPerMessage()` |
+| `$client::maxFileBytes()` | `$client::maxInlineFileBytes($mime)`, `::maxUploadedFileBytes()`, `::maxInlineBlocksPerMessage($mime)`, `::maxRequestBytes()` |
 | `uploadFile()` returned `?string` | returns `string`; throws `GenAiUnsupportedOperationException` / `GenAiUploadException` / `GenAiFileTooLargeException` |
 | `converseWithFileRef()` threw `\LogicException` on Bedrock | throws `GenAiUnsupportedOperationException` (a `GenAiException`) |
 | `$response->toolCalls[n]` had `name`, `input` | also has `id` |

@@ -41,9 +41,9 @@ class GeminiClientTest extends TestCase
         $this->assertTrue(GeminiClient::supportsFileApi());
     }
 
-    public function test_no_documented_per_message_file_cap(): void
+    public function test_no_documented_per_message_block_cap(): void
     {
-        $this->assertNull(GeminiClient::maxFilesPerMessage());
+        $this->assertNull(GeminiClient::maxInlineBlocksPerMessage('application/pdf'));
     }
 
     public function test_oversized_inline_file_is_rejected_before_the_request(): void

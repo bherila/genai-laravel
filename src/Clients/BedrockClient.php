@@ -100,10 +100,16 @@ class BedrockClient implements GenAiClient
         return null;
     }
 
-    /** Converse accepts at most five document blocks in one message. */
-    public static function maxFilesPerMessage(): ?int
+    /** Converse counts documents and images separately: five and twenty per message. */
+    public static function maxInlineBlocksPerMessage(string $mimeType): ?int
     {
-        return 5;
+        return isset(self::MIME_TO_IMAGE_FORMAT[$mimeType]) ? 20 : 5;
+    }
+
+    /** Bedrock documents no overall Converse request ceiling. */
+    public static function maxRequestBytes(): ?int
+    {
+        return null;
     }
 
     public static function supportsFileApi(): bool
@@ -399,32 +405,43 @@ class BedrockClient implements GenAiClient
     }
 
     /**
-     * Images are capped separately by the API and are not counted here.
+     * Documents and images are counted against their own separate caps.
      *
      * @param  list<ContentBlock>  $content
      */
     private function assertDocumentCountWithinLimit(array $content): void
     {
-        $limit = self::maxFilesPerMessage();
-        if ($limit === null) {
-            return;
-        }
-
         $documents = 0;
+        $images = 0;
+
         foreach ($content as $block) {
-            if ($block->type === 'document' && ! isset(self::MIME_TO_IMAGE_FORMAT[(string) $block->mimeType])) {
+            if ($block->type !== ContentBlock::TYPE_DOCUMENT) {
+                continue;
+            }
+            if (isset(self::MIME_TO_IMAGE_FORMAT[(string) $block->mimeType])) {
+                $images++;
+            } else {
                 $documents++;
             }
         }
 
-        if ($documents > $limit) {
-            throw new GenAiFatalException(sprintf(
-                'Bedrock Converse accepts at most %d document blocks per message; this message has %d. '
-                .'Split the documents across turns or merge them before sending.',
-                $limit,
-                $documents,
-            ));
+        self::assertBlockCount($documents, self::maxInlineBlocksPerMessage('application/pdf'), 'document');
+        self::assertBlockCount($images, self::maxInlineBlocksPerMessage('image/png'), 'image');
+    }
+
+    private static function assertBlockCount(int $actual, ?int $limit, string $kind): void
+    {
+        if ($limit === null || $actual <= $limit) {
+            return;
         }
+
+        throw new GenAiFatalException(sprintf(
+            'Bedrock Converse accepts at most %d %s blocks per message; this message has %d. '
+            .'Split them across turns or merge them before sending.',
+            $limit,
+            $kind,
+            $actual,
+        ));
     }
 
     private function contentBlockToBedrock(ContentBlock $block): array

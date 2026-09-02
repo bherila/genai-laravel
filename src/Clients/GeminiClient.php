@@ -88,9 +88,11 @@ class GeminiClient implements GenAiClient
     }
 
     /**
-     * Inline content shares the 20 MB total request budget, and base64 inflates
-     * bytes by a third — so the decoded ceiling is 15 MB regardless of MIME type.
-     * Anything larger belongs in the File API.
+     * Inline content shares the request budget with everything else in the turn,
+     * and base64 inflates bytes by a third, so the decoded ceiling is 15 MB
+     * regardless of MIME type. This is this package's conservative policy, not a
+     * quoted Google ceiling — theirs has moved, and anything approaching it
+     * belongs in the File API anyway.
      * https://ai.google.dev/gemini-api/docs/document-processing
      */
     public static function maxInlineFileBytes(string $mimeType): int
@@ -104,10 +106,21 @@ class GeminiClient implements GenAiClient
         return 2 * 1024 * 1024 * 1024;
     }
 
-    /** Gemini documents no per-message file-count cap. */
-    public static function maxFilesPerMessage(): ?int
+    /** Gemini documents no per-message block-count cap. */
+    public static function maxInlineBlocksPerMessage(string $mimeType): ?int
     {
         return null;
+    }
+
+    /**
+     * A conservative package policy rather than a quoted provider ceiling:
+     * Google's documented inline limit has moved more than once, so this caps
+     * what we will send instead of asserting what they will accept. Anything
+     * near it belongs in the File API regardless.
+     */
+    public static function maxRequestBytes(): ?int
+    {
+        return 20 * 1024 * 1024;
     }
 
     public static function supportsFileApi(): bool
@@ -753,6 +766,8 @@ class GeminiClient implements GenAiClient
      */
     private function doGenerateContent(array $payload): array
     {
+        FileLimits::assertRequestWithin($payload, self::maxRequestBytes(), 'Gemini generateContent');
+
         $url = self::BASE_URL."/v1beta/models/{$this->model}:generateContent";
 
         $response = $this->retry->execute(

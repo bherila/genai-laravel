@@ -67,9 +67,10 @@ class BedrockClientTest extends TestCase
         $this->assertFalse(BedrockClient::supportsFileApi());
     }
 
-    public function test_documents_per_message_are_capped_at_five(): void
+    public function test_documents_and_images_have_separate_per_message_caps(): void
     {
-        $this->assertSame(5, BedrockClient::maxFilesPerMessage());
+        $this->assertSame(5, BedrockClient::maxInlineBlocksPerMessage('application/pdf'));
+        $this->assertSame(20, BedrockClient::maxInlineBlocksPerMessage('image/png'));
     }
 
     /**
@@ -138,6 +139,21 @@ class BedrockClientTest extends TestCase
         }
 
         Http::assertNothingSent();
+    }
+
+    public function test_images_are_counted_against_their_own_cap_not_the_document_one(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $content = [];
+        for ($i = 0; $i < 6; $i++) {
+            $content[] = ContentBlock::document(base64_encode('png'), 'image/png');
+        }
+
+        // Six images is fine — only six *documents* would not be.
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => $content]]);
+
+        Http::assertSentCount(1);
     }
 
     public function test_more_than_five_documents_in_one_message_is_rejected(): void

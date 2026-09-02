@@ -68,6 +68,31 @@ class FileLimitsTest extends TestCase
         }
     }
 
+    public function test_assert_request_within_measures_the_encoded_payload(): void
+    {
+        $payload = ['messages' => [['content' => str_repeat('a', 500)]]];
+
+        // Comfortably inside.
+        FileLimits::assertRequestWithin($payload, 10_000, 'Test provider');
+
+        try {
+            FileLimits::assertRequestWithin($payload, 100, 'Test provider');
+            $this->fail('Expected GenAiFileTooLargeException.');
+        } catch (GenAiFileTooLargeException $e) {
+            $this->assertSame(100, $e->limitBytes);
+            // Measured on the serialized payload, not on the raw content: JSON
+            // syntax and escaping are part of what the provider counts.
+            $this->assertGreaterThan(500, $e->actualBytes);
+        }
+    }
+
+    public function test_assert_request_within_is_a_noop_without_a_limit(): void
+    {
+        FileLimits::assertRequestWithin(['x' => str_repeat('a', 1000)], null, 'Test provider');
+
+        $this->addToAssertionCount(1);
+    }
+
     public function test_human_bytes_renders_provider_limits_readably(): void
     {
         $this->assertSame('512 B', FileLimits::humanBytes(512));

@@ -54,10 +54,24 @@ interface GenAiClient
     public static function maxUploadedFileBytes(): ?int;
 
     /**
-     * Maximum number of document blocks accepted in a single message, or null when
-     * the provider documents no such cap.
+     * Maximum number of inline blocks of this MIME class accepted in one message,
+     * or null when the provider documents no such cap.
+     *
+     * MIME-dependent because providers count documents and images separately —
+     * a single scalar could not express "five documents, twenty images".
      */
-    public static function maxFilesPerMessage(): ?int;
+    public static function maxInlineBlocksPerMessage(string $mimeType): ?int;
+
+    /**
+     * Maximum size of one complete serialized request, or null when the provider
+     * documents no such ceiling.
+     *
+     * Per-block limits alone are not enough: a file can sit under its own limit
+     * and still consume the whole request budget, leaving no room for the prompt,
+     * the tools or the history — and several files can each pass independently
+     * while their sum does not. Clients measure the finished payload.
+     */
+    public static function maxRequestBytes(): ?int;
 
     /**
      * Send a conversation turn and return the raw provider response.

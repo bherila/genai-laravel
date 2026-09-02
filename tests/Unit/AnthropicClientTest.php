@@ -62,9 +62,24 @@ class AnthropicClientTest extends TestCase
         $this->assertSame(500 * 1024 * 1024, AnthropicClient::maxUploadedFileBytes());
     }
 
-    public function test_no_documented_per_message_file_cap(): void
+    public function test_no_documented_per_message_block_cap(): void
     {
-        $this->assertNull(AnthropicClient::maxFilesPerMessage());
+        $this->assertNull(AnthropicClient::maxInlineBlocksPerMessage('application/pdf'));
+    }
+
+    public function test_request_ceiling_is_the_messages_api_limit(): void
+    {
+        // A file at the per-block limit already fills this, which is exactly why
+        // the per-block check cannot be the only one. Enforcement is exercised in
+        // FileLimitsTest, where the ceiling can be small enough not to allocate
+        // 32 MB inside a unit test.
+        $this->assertSame(32 * 1024 * 1024, AnthropicClient::maxRequestBytes());
+        // Exactly: a single file at the per-block limit base64-expands to the
+        // entire request budget, leaving nothing for prompt, tools or history.
+        $this->assertSame(
+            AnthropicClient::maxRequestBytes(),
+            (int) (AnthropicClient::maxInlineFileBytes('application/pdf') * 4 / 3),
+        );
     }
 
     // ── Files API ────────────────────────────────────────────────────────────

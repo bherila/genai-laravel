@@ -151,10 +151,20 @@ class AnthropicClient implements GenAiClient
         return 500 * 1024 * 1024;
     }
 
-    /** Anthropic documents no per-message file-count cap. */
-    public static function maxFilesPerMessage(): ?int
+    /** Anthropic documents no per-message block-count cap. */
+    public static function maxInlineBlocksPerMessage(string $mimeType): ?int
     {
         return null;
+    }
+
+    /**
+     * The Messages API caps the whole request, not each file — which is why the
+     * per-block limit above cannot be the only check.
+     * https://platform.claude.com/docs/en/api/overview
+     */
+    public static function maxRequestBytes(): ?int
+    {
+        return 32 * 1024 * 1024;
     }
 
     /**
@@ -379,6 +389,8 @@ class AnthropicClient implements GenAiClient
             $payload['tools'] = $native['tools'];
             $payload['tool_choice'] = $native['tool_choice'];
         }
+
+        FileLimits::assertRequestWithin($payload, self::maxRequestBytes(), 'Anthropic Messages API');
 
         // The beta flag rides along only when the payload actually references an
         // uploaded file, so applications that never touch the Files API keep an

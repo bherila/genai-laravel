@@ -50,7 +50,12 @@ namespace Bherila\GenAiLaravel\Tests\Unit {
                     return null;
                 }
 
-                public static function maxFilesPerMessage(): ?int
+                public static function maxInlineBlocksPerMessage(string $mimeType): ?int
+                {
+                    return null;
+                }
+
+                public static function maxRequestBytes(): ?int
                 {
                     return null;
                 }

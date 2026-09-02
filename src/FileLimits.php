@@ -94,6 +94,31 @@ final class FileLimits
         );
     }
 
+    /**
+     * Reject a serialized request that exceeds the provider's overall ceiling.
+     *
+     * Measured on the encoded payload rather than estimated from block sizes:
+     * JSON escaping expands text unpredictably, and per-block checks cannot see
+     * the prompt, the tools or the history sharing the same budget.
+     *
+     * @param  array<string, mixed>  $payload
+     *
+     * @throws GenAiFileTooLargeException
+     */
+    public static function assertRequestWithin(array $payload, ?int $limitBytes, string $provider): void
+    {
+        if ($limitBytes === null) {
+            return;
+        }
+
+        $encoded = json_encode($payload);
+        if ($encoded === false) {
+            return;
+        }
+
+        self::assertWithin(strlen($encoded), $limitBytes, $provider, 'the complete serialized request');
+    }
+
     public static function humanBytes(int $bytes): string
     {
         $units = ['B', 'KB', 'MB', 'GB'];
