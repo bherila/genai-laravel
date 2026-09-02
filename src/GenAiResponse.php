@@ -15,8 +15,7 @@ final class GenAiResponse
      * @param  list<array{id: string, name: string, input: array<string, mixed>}>  $toolCalls  Tool/function calls made by the model. `id` correlates a result back to its call (empty on providers that match by name).
      * @param  Usage  $usage  Normalised token-usage data.
      * @param  array<string, mixed>  $raw  Provider-specific raw response (for advanced use / debugging).
-     * @param  array{role: string, content: list<ContentBlock>}|null  $assistantMessage  The assistant turn
-     *        as the provider sent it, preserved by the client. Null only for responses built by hand.
+     * @param  array{role: string, content: list<ContentBlock>}|null  $assistantMessage  The turn as the provider sent it; null only for hand-built responses.
      */
     public function __construct(
         public readonly string $text,
