@@ -7,6 +7,7 @@ use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
+use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
 use Bherila\GenAiLaravel\FileLimits;
@@ -51,18 +52,27 @@ class GeminiClient implements GenAiClient
 
     private RetryStrategy $retry;
 
+    /**
+     * Ceilings for the Office-document conversions this client runs on the
+     * caller's behalf. Best-effort resource guards, not a sandbox — see
+     * ConversionLimits before feeding it documents from untrusted users.
+     */
+    private ConversionLimits $conversionLimits;
+
     public function __construct(
         string $apiKey,
         string $model = 'gemini-3.6-flash',
         int $timeout = 240,
         ?RetryStrategy $retry = null,
         ?string $responseMimeType = 'application/json',
+        ?ConversionLimits $conversionLimits = null,
     ) {
         $this->apiKey = $apiKey;
         $this->model = self::normaliseModelId($model);
         $this->timeout = $timeout;
         $this->responseMimeType = $responseMimeType !== '' ? $responseMimeType : null;
         $this->retry = $retry ?? RetryStrategy::fromConfig();
+        $this->conversionLimits = $conversionLimits ?? ConversionLimits::fromConfig();
     }
 
     public function provider(): string
@@ -228,7 +238,7 @@ class GeminiClient implements GenAiClient
             && WordDocumentToPdf::isAvailable()
         ) {
             // Word doc → PDF: preserves formatting for Gemini's vision pipeline.
-            $pdfB64 = WordDocumentToPdf::convert($fileBytes, $mimeType);
+            $pdfB64 = WordDocumentToPdf::convert($fileBytes, $mimeType, $this->conversionLimits);
             $this->assertInlineSizeWithinLimit($pdfB64, 'application/pdf');
             $parts = [
                 ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]],
@@ -239,7 +249,7 @@ class GeminiClient implements GenAiClient
             && SpreadsheetToText::isAvailable()
         ) {
             // Spreadsheet fallback: extract cell data to text rather than fail.
-            $extracted = SpreadsheetToText::convert($fileBytes, $mimeType);
+            $extracted = SpreadsheetToText::convert($fileBytes, $mimeType, $this->conversionLimits);
             $parts = [['text' => $extracted], ['text' => $prompt]];
         } else {
             $this->assertSupportedDocumentMimeType($mimeType);
@@ -646,7 +656,7 @@ class GeminiClient implements GenAiClient
                 && WordDocumentToPdf::supports($mime)
                 && WordDocumentToPdf::isAvailable()
             ) {
-                $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime);
+                $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime, $this->conversionLimits);
                 $this->assertInlineSizeWithinLimit($pdfB64, 'application/pdf');
 
                 return ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]];
@@ -656,7 +666,7 @@ class GeminiClient implements GenAiClient
                 && SpreadsheetToText::supports($mime)
                 && SpreadsheetToText::isAvailable()
             ) {
-                return ['text' => SpreadsheetToText::convert((string) $block->base64, $mime)];
+                return ['text' => SpreadsheetToText::convert((string) $block->base64, $mime, $this->conversionLimits)];
             }
 
             $this->assertSupportedDocumentMimeType($mime);

@@ -58,7 +58,11 @@ final class SpreadsheetToText
      */
     public static function convert(string $base64, string $mimeType, ?ConversionLimits $limits = null): string
     {
-        $limits ??= new ConversionLimits;
+        $limits ??= ConversionLimits::fromConfig();
+        // The clock starts here, not after load(): parsing the workbook is the
+        // slowest part of a conversion, so a deadline that began afterwards
+        // would exclude the very work it is meant to bound.
+        $deadline = microtime(true) + $limits->maxSeconds;
 
         if (! self::isAvailable()) {
             throw new GenAiFatalException(
@@ -84,7 +88,7 @@ final class SpreadsheetToText
             throw new GenAiFileTooLargeException(
                 sprintf(
                     'SpreadsheetToText: document is %s, above the %s conversion limit. '
-                    .'Raise ConversionLimits::$maxInputBytes if this file is trusted.',
+                    .'Raise ConversionLimits::$maxInputBytes to accept documents this large.',
                     FileLimits::humanBytes(strlen($bytes)),
                     FileLimits::humanBytes($limits->maxInputBytes),
                 ),
@@ -113,7 +117,7 @@ final class SpreadsheetToText
                 throw new GenAiFatalException('SpreadsheetToText: failed to read spreadsheet — '.$e->getMessage(), 0, $e);
             }
 
-            return self::renderSpreadsheet($spreadsheet, $limits);
+            return self::renderSpreadsheet($spreadsheet, $limits, $deadline);
         } finally {
             @unlink($tmp);
         }
@@ -123,10 +127,11 @@ final class SpreadsheetToText
      * Renders under the supplied ceilings, appending a truncation marker rather
      * than throwing: a partial extract is still useful to the model, and a
      * silent one would be worse than either.
+     *
+     * @param  float  $deadline  microtime(true) value past which extraction stops.
      */
-    private static function renderSpreadsheet(Spreadsheet $spreadsheet, ConversionLimits $limits): string
+    private static function renderSpreadsheet(Spreadsheet $spreadsheet, ConversionLimits $limits, float $deadline): string
     {
-        $deadline = microtime(true) + $limits->maxSeconds;
         $parts = [];
         $cells = 0;
         $bytes = 0;

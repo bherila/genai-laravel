@@ -7,6 +7,7 @@ use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
+use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
 use Bherila\GenAiLaravel\FileLimits;
@@ -94,17 +95,26 @@ class AnthropicClient implements GenAiClient
 
     private RetryStrategy $retry;
 
+    /**
+     * Ceilings for the Office-document conversions this client runs on the
+     * caller's behalf. Best-effort resource guards, not a sandbox — see
+     * ConversionLimits before feeding it documents from untrusted users.
+     */
+    private ConversionLimits $conversionLimits;
+
     public function __construct(
         string $apiKey,
         string $model = 'claude-sonnet-4-6',
         int $maxTokens = 8192,
         int $timeout = 240,
         ?RetryStrategy $retry = null,
+        ?ConversionLimits $conversionLimits = null,
     ) {
         $this->apiKey = $apiKey;
         $this->model = $model;
         $this->maxTokens = $maxTokens;
         $this->timeout = $timeout;
+        $this->conversionLimits = $conversionLimits ?? ConversionLimits::fromConfig();
         $this->http = Http::withHeaders([
             'x-api-key' => $apiKey,
             'anthropic-version' => self::API_VERSION,
@@ -716,7 +726,7 @@ class AnthropicClient implements GenAiClient
             // gets full formatting via Anthropic's native PDF pipeline. Requires
             // phpoffice/phpword plus a PDF renderer (dompdf / mpdf / tcpdf).
             if (WordDocumentToPdf::supports($mime) && WordDocumentToPdf::isAvailable()) {
-                $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime);
+                $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime, $this->conversionLimits);
                 $this->assertInlineSizeWithinLimit($pdfB64, 'application/pdf');
 
                 return [
@@ -733,7 +743,7 @@ class AnthropicClient implements GenAiClient
             // as text rather than failing — Anthropic only accepts pdf and text/plain
             // as document blocks, so this is the recommended fallback path.
             if (SpreadsheetToText::supports($mime) && SpreadsheetToText::isAvailable()) {
-                $text = SpreadsheetToText::convert((string) $block->base64, $mime);
+                $text = SpreadsheetToText::convert((string) $block->base64, $mime, $this->conversionLimits);
 
                 return ['type' => 'text', 'text' => $text];
             }

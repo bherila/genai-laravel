@@ -50,13 +50,16 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 ANTHROPIC_MAX_TOKENS=8192
 ```
 
-> **Pin your model IDs.** The defaults above track the models that were current
-> when the release was cut — Google retires Gemini models on a
+> **Pin your model IDs.** The defaults above are placeholders that keep the
+> package bootable, not recommendations — they are not tracked for currency, and
+> no release of this package promises that any of them still resolves to a live
+> model. Google retires Gemini models on a
 > [published schedule](https://ai.google.dev/gemini-api/docs/deprecations), and the
 > right Bedrock prefix depends on your region and data-residency requirements
 > (`anthropic.` in-region, `us.` / `eu.` / `apac.` / `global.` for cross-region
 > inference profiles). Set `GEMINI_MODEL` / `BEDROCK_MODEL` / `ANTHROPIC_MODEL`
-> explicitly in every environment you deploy.
+> explicitly in every environment you deploy, and check each provider's own model
+> list for what is current.
 
 > **Bedrock auth:** this package authenticates against Bedrock with a bearer
 > token (`Authorization: Bearer …`), not AWS SigV4. `BEDROCK_API_KEY` is the
@@ -548,20 +551,39 @@ One gap worth knowing: `uploadFile()` can only preflight a stream whose size
 decides.
 
 Office conversion is bounded too. `SpreadsheetToText` and `WordDocumentToPdf`
-accept an optional `ConversionLimits` capping input size, output size, rows,
-cells, and wall-clock time; XLSX and DOCX are ZIP containers, so a few kilobytes
-on the wire can expand into gigabytes of worksheet. Use
-`ConversionLimits::untrusted()` for end-user uploads:
+apply a `ConversionLimits` capping input size, output size, rows, cells, and
+wall-clock time. Clients read it from `config('genai.conversion')`, so the
+ceilings apply on the facade and factory paths and not only on a direct
+`convert()` call; override it per client or per call:
 
 ```php
+use Bherila\GenAiLaravel\Clients\AnthropicClient;
 use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 
-$text = SpreadsheetToText::convert($base64, $mime, ConversionLimits::untrusted());
+$limits = new ConversionLimits(maxInputBytes: 8 * 1024 * 1024, maxSeconds: 15.0);
+
+SpreadsheetToText::convert($base64, $mime, $limits);      // one conversion
+new AnthropicClient(apiKey: $key, conversionLimits: $limits); // every conversion this client runs
 ```
 
 Spreadsheet extraction truncates rather than throws when it hits a row, cell,
 output, or time ceiling, and marks the cut with a `=== Truncated: … ===` line.
+Word conversion throws when it outruns its budget, since a half-rendered PDF is
+no use to anyone.
+
+> **These limits are not a sandbox.** They bound the accidental cases — a
+> 400,000-row export, a sheet with one cell at XFD1048576, a conversion that
+> would otherwise pin a worker. They are not a defence against a hostile file.
+> XLSX and DOCX are ZIP containers, and only `maxInputBytes` is checked before
+> the bytes reach PhpSpreadsheet or PhpWord: both libraries materialise the
+> archive in-process, so a decompression bomb sized just under that limit can
+> still exhaust memory, and neither can be interrupted once it starts. If you
+> convert documents from people you do not trust, run the conversion in a
+> separate process with an enforced memory cap and CPU limit — a dedicated queue
+> worker with a low `memory_limit`, a container with `--memory`, a `ulimit -v`
+> wrapper — and treat a killed process as a rejected upload. Tighten
+> `ConversionLimits` as a first filter on top of that, not in place of it.
 
 Bedrock natively accepts the Office formats via its own `document` block (the
 Converse API lists `pdf, csv, doc, docx, xls, xlsx, html, txt, md` as native

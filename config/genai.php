@@ -26,6 +26,27 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Office-document conversion limits
+    |--------------------------------------------------------------------------
+    | Applied when a client converts an Office document on your behalf — DOCX to
+    | PDF, XLSX to text. These are best-effort guards against runaway documents
+    | (a huge export, a sparse sheet with a cell at XFD1048576), NOT a security
+    | boundary: only `max_input_bytes` is checked before the file reaches
+    | PhpSpreadsheet or PhpWord, and neither library can be interrupted once it
+    | starts. Converting documents from untrusted users safely needs a separate
+    | process with an enforced memory cap and CPU limit. See the
+    | ConversionLimits class docblock.
+    */
+    'conversion' => [
+        'max_input_bytes' => (int) env('GENAI_CONVERSION_MAX_INPUT_BYTES', 33554432),
+        'max_output_bytes' => (int) env('GENAI_CONVERSION_MAX_OUTPUT_BYTES', 33554432),
+        'max_rows_per_sheet' => (int) env('GENAI_CONVERSION_MAX_ROWS_PER_SHEET', 100000),
+        'max_cells' => (int) env('GENAI_CONVERSION_MAX_CELLS', 2000000),
+        'max_seconds' => (float) env('GENAI_CONVERSION_MAX_SECONDS', 60),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Pricing table (USD per million tokens)
     |--------------------------------------------------------------------------
     | No provider catalog API returns pricing, so listModels() always leaves
@@ -63,8 +84,9 @@ return [
             'api_key' => env('GEMINI_API_KEY'),
 
             // Model ID. Pin this explicitly in your own .env: Google retires Gemini
-            // models on a published schedule, and a package default can only ever
-            // track the model that was current when the release was cut.
+            // models on a published schedule, and this default is a placeholder
+            // that keeps the package bootable rather than a recommendation — it
+            // is not tracked for currency.
             // See https://ai.google.dev/gemini-api/docs/models/gemini and
             // https://ai.google.dev/gemini-api/docs/deprecations
             'model' => env('GEMINI_MODEL', 'gemini-3.6-flash'),
