@@ -3,6 +3,9 @@
 namespace Bherila\GenAiLaravel\Contracts;
 
 use Bherila\GenAiLaravel\ContentBlock;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\Usage;
@@ -25,15 +28,50 @@ interface GenAiClient
     public function provider(): string;
 
     /**
-     * The model identifier in use (e.g. "claude-sonnet-4-6", "gemini-2.0-flash").
+     * The model identifier in use (e.g. "claude-sonnet-4-6", "gemini-3.6-flash").
      * Used for logging and audit records so callers do not need to read provider config.
      */
     public function model(): string;
 
     /**
-     * Hard limit in bytes for a single file/document block this provider accepts.
+     * Maximum decoded size, in bytes, of one file sent inline (base64) in a message.
+     *
+     * The limit is MIME-dependent: providers cap images far lower than documents,
+     * and the ceiling for inline content is the *request* budget rather than any
+     * per-file allowance, so base64 expansion is already accounted for. Clients
+     * enforce this themselves before a request leaves the process — a file over
+     * the limit raises GenAiFileTooLargeException rather than a provider 400.
      */
-    public static function maxFileBytes(): int;
+    public static function maxInlineFileBytes(string $mimeType): int;
+
+    /**
+     * Maximum decoded size, in bytes, of one file sent through the provider's
+     * File API, or null when the provider has no File API.
+     *
+     * This is typically orders of magnitude larger than the inline limit, which is
+     * the whole reason to upload rather than inline.
+     */
+    public static function maxUploadedFileBytes(): ?int;
+
+    /**
+     * Maximum number of inline blocks of this MIME class accepted in one message,
+     * or null when the provider documents no such cap.
+     *
+     * MIME-dependent because providers count documents and images separately —
+     * a single scalar could not express "five documents, twenty images".
+     */
+    public static function maxInlineBlocksPerMessage(string $mimeType): ?int;
+
+    /**
+     * Maximum size of one complete serialized request, or null when the provider
+     * documents no such ceiling.
+     *
+     * Per-block limits alone are not enough: a file can sit under its own limit
+     * and still consume the whole request budget, leaving no room for the prompt,
+     * the tools or the history — and several files can each pass independently
+     * while their sum does not. Clients measure the finished payload.
+     */
+    public static function maxRequestBytes(): ?int;
 
     /**
      * Send a conversation turn and return the raw provider response.
@@ -41,31 +79,41 @@ interface GenAiClient
      * @param  string  $system  System prompt text (empty string to omit).
      * @param  list<array{role: string, content: list<ContentBlock>}>  $messages
      * @param  ToolConfig|null  $toolConfig  Tool definitions and calling strategy.
-     * @return array<string, mixed>  Raw provider response array.
+     * @return array<string, mixed> Raw provider response array.
      */
     public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array;
 
     /**
-     * Upload a file to the provider's File API and return a reference URI/ID.
+     * Whether this provider exposes a File API that uploadFile() can use.
      *
-     * Returns null when the provider does not support a separate file upload step.
-     *
-     * @param  resource|string  $fileContent
-     * @return string|null  Provider file URI/ID, or null when unsupported.
+     * Callers that want to degrade gracefully should branch on this rather than
+     * catching GenAiUnsupportedOperationException.
      */
-    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string;
+    public static function supportsFileApi(): bool;
 
     /**
-     * Delete a previously uploaded file. No-op when unsupported.
+     * Upload a file to the provider's File API and return a reference URI/ID.
+     *
+     * @param  resource|string  $fileContent
+     * @return string Provider file URI/ID.
+     *
+     * @throws GenAiUnsupportedOperationException When the provider has no File API.
+     * @throws GenAiUploadException When the provider rejected or failed the upload.
+     * @throws GenAiFileTooLargeException When the file exceeds maxUploadedFileBytes().
+     */
+    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): string;
+
+    /**
+     * Delete a previously uploaded file. No-op for providers without a File API.
      */
     public function deleteFile(string $fileRef): void;
 
     /**
      * Send a request referencing an already-uploaded file.
      *
-     * Throws LogicException for providers without a File API (Bedrock, Anthropic).
-     *
      * @return array<string, mixed>
+     *
+     * @throws GenAiUnsupportedOperationException When the provider has no File API.
      */
     public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array;
 
@@ -88,10 +136,31 @@ interface GenAiClient
     /**
      * Extract tool/function call results from a raw provider response.
      *
+     * `id` is the provider's call identifier, which Anthropic and Bedrock both
+     * require back on the matching tool-result block. Gemini correlates results
+     * by function name instead and usually sends no id, so it can be an empty
+     * string — build results with ContentBlock::toolResultFor(), which carries
+     * both and stays portable.
+     *
      * @param  array<string, mixed>  $response
-     * @return list<array{name: string, input: array<string, mixed>}>
+     * @return list<array{id: string, name: string, input: array<string, mixed>}>
      */
     public function extractToolCalls(array $response): array;
+
+    /**
+     * Rebuild the assistant turn from a raw response, in the provider's own part
+     * order and keeping any state this package does not model.
+     *
+     * A tool loop has to replay the assistant turn before its results, and
+     * reconstructing that turn from the flattened text + toolCalls projections
+     * silently drops two things providers care about: the interleaving of text
+     * and calls, and opaque per-part state such as a Gemini thought signature.
+     * Both only fail on the *next* request, as a provider validation error.
+     *
+     * @param  array<string, mixed>  $response
+     * @return array{role: string, content: list<ContentBlock>}
+     */
+    public function extractAssistantMessage(array $response): array;
 
     /**
      * Verify that the configured credentials are accepted by the provider.

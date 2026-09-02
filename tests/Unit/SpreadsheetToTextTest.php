@@ -20,7 +20,7 @@ class SpreadsheetToTextTest extends TestCase
     /** Build a small two-sheet workbook and return it as base64. */
     private function makeXlsxBase64(): string
     {
-        $spreadsheet = new Spreadsheet();
+        $spreadsheet = new Spreadsheet;
 
         $sheet1 = $spreadsheet->getActiveSheet();
         $sheet1->setTitle('Invoices');

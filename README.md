@@ -2,6 +2,18 @@
 
 Provider-agnostic GenAI client for Laravel. Supports Google Gemini, AWS Bedrock (Claude), and Anthropic direct API through a single interface.
 
+## Requirements
+
+- PHP 8.4+
+- Laravel 13
+
+Laravel 13 ships a first-party AI SDK (`laravel/ai`) covering text generation
+across the same providers. This package stays focused on what that abstraction
+does not cover: runtime per-tenant credentials, raw provider parity (model
+enumeration, normalised token/cost accounting), and automatic Office-document
+conversion. If you only need plain text generation on Laravel 13, prefer
+`laravel/ai`.
+
 ## Installation
 
 ```bash
@@ -24,19 +36,30 @@ GENAI_PROVIDER=gemini
 
 # Gemini
 GEMINI_API_KEY=your-key
-GEMINI_MODEL=gemini-2.0-flash
+GEMINI_MODEL=gemini-3.6-flash
 
 # Bedrock — uses Bearer-token auth, not AWS SigV4
 BEDROCK_API_KEY=your-bedrock-bearer-token
 BEDROCK_SESSION_TOKEN=   # optional, for temporary credentials
 BEDROCK_REGION=us-east-1
-BEDROCK_MODEL=us.anthropic.claude-haiku-4-20250514-v1:0
+BEDROCK_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0
 
 # Anthropic
 ANTHROPIC_API_KEY=your-key
 ANTHROPIC_MODEL=claude-sonnet-4-6
 ANTHROPIC_MAX_TOKENS=8192
 ```
+
+> **Pin your model IDs.** The defaults above are placeholders that keep the
+> package bootable, not recommendations — they are not tracked for currency, and
+> no release of this package promises that any of them still resolves to a live
+> model. Google retires Gemini models on a
+> [published schedule](https://ai.google.dev/gemini-api/docs/deprecations), and the
+> right Bedrock prefix depends on your region and data-residency requirements
+> (`anthropic.` in-region, `us.` / `eu.` / `apac.` / `global.` for cross-region
+> inference profiles). Set `GEMINI_MODEL` / `BEDROCK_MODEL` / `ANTHROPIC_MODEL`
+> explicitly in every environment you deploy, and check each provider's own model
+> list for what is current.
 
 > **Bedrock auth:** this package authenticates against Bedrock with a bearer
 > token (`Authorization: Bearer …`), not AWS SigV4. `BEDROCK_API_KEY` is the
@@ -120,8 +143,65 @@ $response = GenAiRequest::with($client)
     ->generate();
 
 $call = $response->toolCallByName('extract_invoice');
-// ['name' => 'extract_invoice', 'input' => ['vendor' => 'Acme', 'amount' => 1500.00, ...]]
+// ['id' => 'toolu_01A…', 'name' => 'extract_invoice', 'input' => ['vendor' => 'Acme', ...]]
 ```
+
+#### Completing the loop
+
+Executing a tool and handing the result back needs three things the response
+alone used to lack: the call's ID, the assistant turn replayed into the history
+(Anthropic and Bedrock both reject a result whose call is not already there),
+and a neutral way to express the result. All three are provider-agnostic:
+
+```php
+$messages = [['role' => 'user', 'content' => [ContentBlock::text($prompt)]]];
+
+// Note the parameter: an arrow function captures by value at definition, so a
+// closure over $messages would resend the first turn forever.
+$ask = static fn (array $history) => GenAiRequest::with($client)
+    ->messages($history)
+    ->tools($toolConfig)
+    ->generate();
+
+$response = $ask($messages);
+
+while ($response->hasToolCalls()) {
+    $messages[] = $response->assistantMessage();
+
+    $results = [];
+    foreach ($response->toolCalls as $call) {
+        $results[] = ContentBlock::toolResultFor($call, $myTools->run($call['name'], $call['input']));
+    }
+
+    $messages[] = ['role' => 'user', 'content' => $results];
+    $response = $ask($messages);
+}
+
+echo $response->text;
+```
+
+`ContentBlock::toolResultFor()` carries both the call ID and the function name,
+because Anthropic and Bedrock correlate results by ID while Gemini correlates by
+name (echoing the ID back when the model sent one) — one message, three wire
+formats:
+
+| | Call | Result |
+|---|---|---|
+| Anthropic | `tool_use` | `tool_result` + `tool_use_id` |
+| Bedrock | `toolUse` | `toolResult` + `toolUseId` + `status` |
+| Gemini | `functionCall` | `functionResponse` matched by `name`, plus `id` when the model sent one |
+
+`$response->assistantMessage()` returns the assistant turn **as the provider sent
+it** — original part order, and any opaque per-part state the provider attached
+(a Gemini `thoughtSignature`, an Anthropic `thinking` block and its signature, a
+Bedrock `reasoningContent` block). That matters because several providers reject
+a later turn whose history dropped that state, and the failure surfaces on the
+*next* request rather than where the loss happened. Rebuilding the turn yourself
+from `->text` and `->toolCalls` loses it; use `assistantMessage()`.
+
+A tool that failed is `ContentBlock::toolResultFor($call, $message, isError: true)`,
+which becomes Anthropic's `is_error`, Bedrock's `status: "error"`, or a Gemini
+`{"error": …}` response, so the model can recover instead of hanging.
 
 #### Schema helpers
 
@@ -145,23 +225,59 @@ ToolChoice::none()          // model must not call any tool
 ToolChoice::tool('my_fn')   // model must call this specific tool
 ```
 
-### Gemini File API (large files)
+### File APIs (large files)
+
+Gemini and Anthropic both store uploaded files and let you reference them by ID
+instead of re-sending the bytes on every turn; Bedrock does not. Branch on
+`supportsFileApi()` rather than on the provider name.
+
+Upload, reference, delete — the reference flows through the same builder as
+inline bytes:
 
 ```php
 $fileRef = $client->uploadFile($stream, 'application/pdf', 'report.pdf');
+
 try {
     $response = GenAiRequest::with($client)
-        ->messages([[
-            'role' => 'user',
-            'content' => [ContentBlock::text('Summarise this report.')],
-        ]])
+        ->withFileRef($fileRef, 'application/pdf')
+        ->prompt('Summarise this report.')
         ->generate();
-    // or use the lower-level method directly:
-    $raw = $client->converseWithFileRef($fileRef, 'application/pdf', 'Summarise.');
+
+    echo $response->text;
 } finally {
     $client->deleteFile($fileRef);
 }
 ```
+
+`ContentBlock::fileReference()` is the same thing at the message level, so an
+uploaded file and inline bytes can sit side by side in one turn:
+
+```php
+->messages([[
+    'role' => 'user',
+    'content' => [
+        ContentBlock::fileReference($fileRef, 'application/pdf'),
+        ContentBlock::document($smallBase64, 'application/pdf'),
+        ContentBlock::text('Which figures changed?'),
+    ],
+]])
+```
+
+The lower-level `converseWithFileRef($fileRef, $mime, $prompt)` is still there
+for a single-file, single-prompt call.
+
+`uploadFile()` returns the provider's reference as a string and throws on
+failure — `GenAiUnsupportedOperationException` when the provider has no File API,
+`GenAiUploadException` when the upload itself failed, `GenAiFileTooLargeException`
+when the file is over the provider's ceiling. It never returns `null`.
+
+> **Anthropic file scoping.** Files uploaded to the Anthropic Files API are
+> scoped to the API **workspace**, not to a user or a conversation: any key in
+> the same workspace can reference the returned `file_id`. Where tenants must
+> not see each other's documents, give each one its own workspace and key, or
+> keep sending bytes inline — which stores nothing. Anthropic also exposes
+> listing and metadata, surfaced here as the provider-specific
+> `AnthropicClient::listFiles()` and `::fileMetadata()`.
 
 ### Dependency injection (single provider)
 
@@ -191,10 +307,46 @@ class MyService
 
 ### Facade
 
+The `GenAi` facade resolves whatever is bound to the `GenAiClient` contract, so
+it fits an application on a single provider. There is no `GenAi::client('…')`:
+picking a provider per call is `GenAiClientFactory::make()`'s job.
+
 ```php
 use Bherila\GenAiLaravel\Facades\GenAi;
 
-$response = GenAi::converse($system, $messages, $toolConfig);
+$raw = GenAi::converse($system, $messages, $toolConfig);   // $system is a string
+$text = GenAi::extractText($raw);
+$usage = GenAi::extractUsage($raw);
+```
+
+### Per-request credentials
+
+When a key belongs to a tenant or a user rather than to the deployment, pass it
+to the factory. The provider is inferred from the credential type, and anything
+you leave unset still comes from `genai.providers.*`:
+
+```php
+use Bherila\GenAiLaravel\Clients\GenAiClientFactory;
+use Bherila\GenAiLaravel\Credentials\AnthropicCredentials;
+use Bherila\GenAiLaravel\Credentials\BedrockCredentials;
+use Bherila\GenAiLaravel\Credentials\GeminiCredentials;
+
+$client = GenAiClientFactory::make(
+    credentials: new GeminiCredentials(apiKey: $user->gemini_key),
+);
+
+// Region and model travel with the credentials where they need to:
+$client = GenAiClientFactory::make(
+    credentials: new BedrockCredentials(
+        apiKey: $tenant->bedrock_token,
+        region: $tenant->aws_region,
+        model: $tenant->bedrock_model,
+    ),
+);
+
+$client = GenAiClientFactory::make(
+    credentials: new AnthropicCredentials(apiKey: $tenant->anthropic_key),
+);
 ```
 
 ## GenAiResponse
@@ -204,12 +356,13 @@ $response = GenAi::converse($system, $messages, $toolConfig);
 | Property / method | Description |
 |---|---|
 | `->text` | Concatenated text output |
-| `->toolCalls` | `[['name' => '...', 'input' => [...]], ...]` |
+| `->toolCalls` | `[['id' => '...', 'name' => '...', 'input' => [...]], ...]` |
 | `->usage` | Normalised `Usage` (tokens, cache tokens) — see below |
 | `->raw` | Provider-specific raw response array |
 | `->hasToolCalls()` | Whether the model called any tool |
 | `->firstToolCall()` | First tool call, or `null` |
 | `->toolCallByName('fn')` | Named tool call, or `null` |
+| `->assistantMessage()` | This turn as a message to append before tool results |
 
 ### Token usage and cost
 
@@ -272,7 +425,7 @@ Every client implements `listModels(): ModelInfo[]`, hitting each provider's
 catalog endpoint and normalising the result:
 
 ```php
-$client = GenAi::client('anthropic'); // or 'bedrock', 'gemini'
+$client = GenAiClientFactory::make('anthropic'); // or 'bedrock', 'gemini'
 
 foreach ($client->listModels() as $model) {
     $model->id;                          // call-ready identifier
@@ -309,10 +462,10 @@ $book = PricingBook::fromArray([
         'claude-sonnet-4-6' => ['input' => 3.0, 'output' => 15.0, 'cache_read' => 0.3, 'cache_creation' => 3.75],
     ],
     'bedrock' => [
-        'us.anthropic.claude-haiku-4-20250514-v1:0' => ['input' => 0.8, 'output' => 4.0],
+        'us.anthropic.claude-haiku-4-5-20251001-v1:0' => ['input' => 0.8, 'output' => 4.0],
     ],
     'gemini' => [
-        'gemini-2.0-flash' => ['input' => 0.1, 'output' => 0.4],
+        'gemini-3.6-flash' => ['input' => 0.1, 'output' => 0.4],
     ],
 ]);
 
@@ -373,12 +526,74 @@ back to a clear `GenAiFatalException` telling the caller what to install.
 - 📊 Spreadsheet → text requires `phpoffice/phpspreadsheet`. Install with
   `composer require phpoffice/phpspreadsheet`.
 
+### Size limits
+
+The limits differ by capability, not just by provider, so they are exposed as
+three separate questions rather than one number:
+
+```php
+$client::maxInlineFileBytes('application/pdf'); // decoded bytes for one inline block
+$client::maxUploadedFileBytes();                // decoded bytes via the File API, null when there is none
+$client::maxInlineBlocksPerMessage($mime);      // blocks of that kind per message, null when uncapped
+$client::maxRequestBytes();                    // whole serialized request, null when uncapped
+$client::supportsFileApi();                     // whether uploadFile() will work at all
+```
+
+Per-file limits are expressed in **decoded** bytes; `maxRequestBytes()` measures
+the finished serialized payload, because a file can sit under its own limit and
+still leave no room for the prompt, the tools or the history — and several files
+can each pass independently while their sum does not. Clients enforce both before
+a request leaves the process and throw `GenAiFileTooLargeException` — carrying
+`$actualBytes` and `$limitBytes` — so an oversized request costs no round trip.
+
+One gap worth knowing: `uploadFile()` can only preflight a stream whose size
+`fstat()` reports. A non-seekable stream is sent unchecked and the provider
+decides.
+
+Office conversion is bounded too. `SpreadsheetToText` and `WordDocumentToPdf`
+apply a `ConversionLimits` capping input size, output size, rows, cells, and
+wall-clock time. Clients read it from `config('genai.conversion')`, so the
+ceilings apply on the facade and factory paths and not only on a direct
+`convert()` call; override it per client or per call:
+
+```php
+use Bherila\GenAiLaravel\Clients\AnthropicClient;
+use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
+use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
+
+$limits = new ConversionLimits(maxInputBytes: 8 * 1024 * 1024, maxSeconds: 15.0);
+
+// One conversion.
+SpreadsheetToText::convert($base64, $mime, $limits);
+
+// Every conversion this client runs on your behalf.
+$client = new AnthropicClient(apiKey: $key, conversionLimits: $limits);
+```
+
+Spreadsheet extraction truncates rather than throws when it hits a row, cell,
+output, or time ceiling, and marks the cut with a `=== Truncated: … ===` line.
+Word conversion throws when it outruns its budget, since a half-rendered PDF is
+no use to anyone.
+
+> **These limits are not a sandbox.** They bound the accidental cases — a
+> 400,000-row export, a sheet with one cell at XFD1048576, a conversion that
+> would otherwise pin a worker. They are not a defence against a hostile file.
+> XLSX and DOCX are ZIP containers, and only `maxInputBytes` is checked before
+> the bytes reach PhpSpreadsheet or PhpWord: both libraries materialise the
+> archive in-process, so a decompression bomb sized just under that limit can
+> still exhaust memory, and neither can be interrupted once it starts. If you
+> convert documents from people you do not trust, run the conversion in a
+> separate process with an enforced memory cap and CPU limit — a dedicated queue
+> worker with a low `memory_limit`, a container with `--memory`, a `ulimit -v`
+> wrapper — and treat a killed process as a rejected upload. Tighten
+> `ConversionLimits` as a first filter on top of that, not in place of it.
+
 Bedrock natively accepts the Office formats via its own `document` block (the
 Converse API lists `pdf, csv, doc, docx, xls, xlsx, html, txt, md` as native
 formats), so no conversion runs for Bedrock requests.
 
 > **Note:** PowerPoint (`.ppt`, `.pptx`, `.odp`) auto-conversion is not
-> included in this PR — the only available PHP library (`phpoffice/phppresentation`)
+> currently supported — the only available PHP library (`phpoffice/phppresentation`)
 > pins an older `phpoffice/phpspreadsheet` version that currently has open
 > security advisories. Until that's resolved upstream, convert PowerPoint files
 > to PDF yourself (e.g. via `libreoffice --convert-to pdf`) before sending them.
@@ -387,10 +602,14 @@ formats), so no conversion runs for Bedrock requests.
 
 | Feature | Gemini | Bedrock | Anthropic |
 |---|---|---|---|
-| File upload API | ✅ `uploadFile()` | ❌ inline only | ❌ inline only |
+| File upload API | ✅ `uploadFile()` | ❌ inline only | ✅ `uploadFile()` |
 | Inline file bytes | ✅ | ✅ | ✅ |
 | Tool/function calling | ✅ | ✅ | ✅ |
-| File size limit | 20 MB | 4.5 MB | 4.5 MB |
+| Tool-result round trip | ✅ (by name) | ✅ (by id) | ✅ (by id) |
+| Max inline file (decoded) | 15 MB | 4.5 MB doc / 3.75 MB image | 24 MB doc / 5 MB image |
+| Max uploaded file | 2 GB | n/a | 500 MB |
+| Blocks per message | unlimited | 5 documents / 20 images | unlimited |
+| Whole-request ceiling | 20 MB (package policy) | — | 32 MB |
 | System prompts | ✅ | ✅ | ✅ |
 | `listModels()` | ✅ | ✅ (control-plane) | ✅ |
 | `checkCredentials()` | ✅ | ✅ | ✅ |
@@ -399,6 +618,32 @@ formats), so no conversion runs for Bedrock requests.
 | Office-format documents | auto-convert 📄📊 | ✅ native | auto-convert 📄📊 |
 | Auto DOC/DOCX → PDF (with phpword + dompdf) | ✅ | n/a | ✅ |
 | Auto XLSX/XLS/ODS/CSV → text (with phpspreadsheet) | ✅ | n/a | ✅ |
+
+## Upgrading from 0.1.0
+
+The provider-drift fixes changed a few public signatures. All of them are
+compile-time visible — nothing changes behaviour silently.
+
+| Before | Now |
+|---|---|
+| `$client::maxFileBytes()` | `$client::maxInlineFileBytes($mime)`, `::maxUploadedFileBytes()`, `::maxInlineBlocksPerMessage($mime)`, `::maxRequestBytes()` |
+| `uploadFile()` returned `?string` | returns `string`; throws `GenAiUnsupportedOperationException` / `GenAiUploadException` / `GenAiFileTooLargeException` |
+| `converseWithFileRef()` threw `\LogicException` on Bedrock | throws `GenAiUnsupportedOperationException` (a `GenAiException`) |
+| `$response->toolCalls[n]` had `name`, `input` | also has `id` |
+| `GenAi::client('anthropic')` (never existed) | `GenAiClientFactory::make('anthropic')` |
+
+Also worth knowing:
+
+- Oversized files now raise `GenAiFileTooLargeException` locally instead of
+  reaching the provider. If you were relying on a provider 400, catch this instead.
+- `ToolChoice::none()` on Bedrock now suppresses the tool definitions as well as
+  the choice, so the model can no longer call a tool you asked it not to.
+- Anthropic `text/plain` documents are sent as a text source, and the base64 you
+  pass must actually decode — invalid input now fails loudly.
+- The Gemini catalog returns bare model IDs (`gemini-3.6-flash`), not resource
+  names (`models/gemini-3.6-flash`). Stored IDs from the old shape still work:
+  the client strips the prefix.
+- Requires PHP 8.4 and Laravel 13.
 
 ## License
 

@@ -5,8 +5,14 @@ namespace Bherila\GenAiLaravel\Tests\Unit;
 use Bherila\GenAiLaravel\Clients\BedrockClient;
 use Bherila\GenAiLaravel\Clients\GeminiClient;
 use Bherila\GenAiLaravel\Clients\GenAiClientFactory;
+use Bherila\GenAiLaravel\ContentBlock;
+use Bherila\GenAiLaravel\Credentials\AnthropicCredentials;
+use Bherila\GenAiLaravel\Credentials\BedrockCredentials;
+use Bherila\GenAiLaravel\Credentials\GeminiCredentials;
 use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\GenAiServiceProvider;
+use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Http;
 use Orchestra\Testbench\TestCase;
 
 class GenAiClientFactoryTest extends TestCase
@@ -75,6 +81,150 @@ class GenAiClientFactoryTest extends TestCase
         $this->expectException(GenAiException::class);
         $this->expectExceptionMessageMatches('/api_key is not set/');
         GenAiClientFactory::make('bedrock');
+    }
+
+    // ── per-request credentials ──────────────────────────────────────────────
+
+    public function test_credentials_override_the_configured_key(): void
+    {
+        config(['genai.default' => 'gemini', 'genai.providers.gemini.api_key' => 'site-wide-key']);
+
+        Http::fake(['*' => Http::response(['candidates' => []])]);
+
+        GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: 'per-user-key'))
+            ->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        Http::assertSent(fn (Request $req) => $req->header('x-goog-api-key')[0] === 'per-user-key');
+    }
+
+    public function test_credentials_alone_select_the_provider(): void
+    {
+        config(['genai.default' => 'gemini']);
+
+        $client = GenAiClientFactory::make(credentials: new AnthropicCredentials(apiKey: 'k'));
+
+        $this->assertSame('anthropic', $client->provider());
+    }
+
+    public function test_credentials_can_override_the_model(): void
+    {
+        config(['genai.providers.bedrock.api_key' => 'site', 'genai.providers.bedrock.model' => 'configured-model']);
+
+        $client = GenAiClientFactory::make(credentials: new BedrockCredentials(
+            apiKey: 'tenant-token',
+            region: 'eu-west-1',
+            model: 'eu.anthropic.claude-haiku-4-5-20251001-v1:0',
+        ));
+
+        $this->assertSame('eu.anthropic.claude-haiku-4-5-20251001-v1:0', $client->model());
+    }
+
+    public function test_credentials_leave_unset_values_to_config(): void
+    {
+        config([
+            'genai.providers.gemini.api_key' => 'site',
+            'genai.providers.gemini.model' => 'gemini-3.5-flash',
+        ]);
+
+        $client = GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: 'tenant'));
+
+        $this->assertSame('gemini-3.5-flash', $client->model());
+    }
+
+    public function test_credentials_that_do_not_match_the_requested_provider_are_rejected(): void
+    {
+        config(['genai.providers.bedrock.api_key' => 'k']);
+
+        $this->expectException(GenAiException::class);
+        $this->expectExceptionMessageMatches('/which is for "gemini"/');
+
+        GenAiClientFactory::make('bedrock', new GeminiCredentials(apiKey: 'k'));
+    }
+
+    public function test_credentials_work_without_any_configured_key(): void
+    {
+        config(['genai.providers.anthropic.api_key' => null]);
+
+        $client = GenAiClientFactory::make(credentials: new AnthropicCredentials(apiKey: 'tenant-key'));
+
+        $this->assertSame('anthropic', $client->provider());
+    }
+
+    // ── supplied credentials are authoritative for secrets ───────────────────
+
+    public function test_empty_gemini_credentials_never_borrow_the_deployment_key(): void
+    {
+        config(['genai.providers.gemini.api_key' => 'deployment-key']);
+
+        Http::fake();
+
+        $this->expectException(GenAiException::class);
+        $this->expectExceptionMessageMatches('/refusing to fall back/');
+
+        GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: ''));
+    }
+
+    public function test_empty_anthropic_credentials_never_borrow_the_deployment_key(): void
+    {
+        config(['genai.providers.anthropic.api_key' => 'deployment-key']);
+
+        $this->expectException(GenAiException::class);
+
+        GenAiClientFactory::make(credentials: new AnthropicCredentials(apiKey: ''));
+    }
+
+    public function test_a_missing_tenant_key_fails_before_any_request_is_sent(): void
+    {
+        config(['genai.providers.gemini.api_key' => 'deployment-key']);
+
+        Http::fake();
+
+        try {
+            GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: ''));
+            $this->fail('Expected GenAiException.');
+        } catch (GenAiException) {
+            // expected
+        }
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * A bearer token and its STS session token are halves of one credential —
+     * pairing a tenant's token with the deployment's would be a broken request at
+     * best and a cross-tenant call at worst.
+     */
+    public function test_tenant_bedrock_credentials_do_not_inherit_the_global_session_token(): void
+    {
+        config([
+            'genai.providers.bedrock.api_key' => 'deployment-token',
+            'genai.providers.bedrock.session_token' => 'deployment-session-token',
+        ]);
+
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        GenAiClientFactory::make(credentials: new BedrockCredentials(apiKey: 'tenant-token'))
+            ->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        Http::assertSent(function (Request $req) {
+            return $req->header('Authorization')[0] === 'Bearer tenant-token'
+                && $req->header('X-Amz-Security-Token') === [];
+        });
+    }
+
+    public function test_config_session_token_still_applies_without_credentials(): void
+    {
+        config([
+            'genai.providers.bedrock.api_key' => 'deployment-token',
+            'genai.providers.bedrock.session_token' => 'deployment-session-token',
+        ]);
+
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        GenAiClientFactory::make('bedrock')
+            ->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        Http::assertSent(fn (Request $req) => $req->header('X-Amz-Security-Token')[0] === 'deployment-session-token');
     }
 
     /**
