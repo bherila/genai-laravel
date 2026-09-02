@@ -220,6 +220,50 @@ class BedrockClient implements GenAiClient
         return $calls;
     }
 
+    /**
+     * Replays the assistant turn in Bedrock's own block order, keeping any block
+     * kind this package does not model (reasoningContent and its signature)
+     * verbatim rather than dropping it from the history.
+     *
+     * @param  array<string, mixed>  $response
+     * @return array{role: string, content: list<ContentBlock>}
+     */
+    public function extractAssistantMessage(array $response): array
+    {
+        $content = [];
+
+        foreach ($response['output']['message']['content'] ?? [] as $block) {
+            if (! is_array($block)) {
+                continue;
+            }
+
+            if (isset($block['text']) && is_string($block['text'])) {
+                $rest = $block;
+                unset($rest['text']);
+                $content[] = ContentBlock::text($block['text'], $rest);
+
+                continue;
+            }
+
+            if (isset($block['toolUse']['name'])) {
+                $rest = $block;
+                unset($rest['toolUse']);
+                $content[] = ContentBlock::toolCall(
+                    id: (string) ($block['toolUse']['toolUseId'] ?? ''),
+                    name: (string) $block['toolUse']['name'],
+                    input: is_array($block['toolUse']['input'] ?? null) ? $block['toolUse']['input'] : [],
+                    providerMetadata: $rest,
+                );
+
+                continue;
+            }
+
+            $content[] = ContentBlock::providerRaw($block);
+        }
+
+        return ['role' => 'assistant', 'content' => $content];
+    }
+
     public function checkCredentials(): bool
     {
         $response = $this->http->get("https://bedrock.{$this->region}.amazonaws.com/foundation-models");
@@ -385,8 +429,12 @@ class BedrockClient implements GenAiClient
 
     private function contentBlockToBedrock(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_PROVIDER_RAW) {
+            return $block->providerMetadata;
+        }
+
         if ($block->type === ContentBlock::TYPE_TOOL_CALL) {
-            return [
+            return $block->providerMetadata + [
                 'toolUse' => [
                     'toolUseId' => (string) $block->toolCallId,
                     'name' => (string) $block->toolName,
@@ -438,7 +486,7 @@ class BedrockClient implements GenAiClient
             ];
         }
 
-        return ['text' => $block->text ?? ''];
+        return $block->providerMetadata + ['text' => $block->text ?? ''];
     }
 
     private function assertInlineSizeWithinLimit(string $base64, string $mimeType): void

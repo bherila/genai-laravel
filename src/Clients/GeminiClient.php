@@ -339,6 +339,67 @@ class GeminiClient implements GenAiClient
         return $calls;
     }
 
+    /**
+     * Gemini 3 attaches a `thoughtSignature` to function-call parts and rejects a
+     * later turn whose history dropped it, so parts are replayed in order with
+     * every unmodelled key intact rather than rebuilt from text + tool calls.
+     *
+     * @param  array<string, mixed>  $response
+     * @return array{role: string, content: list<ContentBlock>}
+     */
+    public function extractAssistantMessage(array $response): array
+    {
+        $parts = $response['candidates'][0]['content']['parts'] ?? [];
+        $content = [];
+
+        if (is_array($parts)) {
+            foreach ($parts as $part) {
+                if (! is_array($part)) {
+                    continue;
+                }
+
+                if (isset($part['text']) && is_string($part['text'])) {
+                    $content[] = ContentBlock::text($part['text'], self::partMetadata($part, ['text']));
+
+                    continue;
+                }
+
+                $fn = $part['functionCall'] ?? null;
+                if (is_array($fn) && isset($fn['name'])) {
+                    $content[] = ContentBlock::toolCall(
+                        id: is_string($fn['id'] ?? null) ? $fn['id'] : '',
+                        name: (string) $fn['name'],
+                        input: is_array($fn['args'] ?? null) ? $fn['args'] : [],
+                        providerMetadata: self::partMetadata($part, ['functionCall']),
+                    );
+
+                    continue;
+                }
+
+                // Anything else (thought parts, future part kinds) is replayed as-is.
+                $content[] = ContentBlock::providerRaw($part);
+            }
+        }
+
+        return ['role' => 'assistant', 'content' => $content];
+    }
+
+    /**
+     * The keys of a part this package does not model, kept for replay.
+     *
+     * @param  array<string, mixed>  $part
+     * @param  list<string>  $modelled
+     * @return array<string, mixed>
+     */
+    private static function partMetadata(array $part, array $modelled): array
+    {
+        foreach ($modelled as $key) {
+            unset($part[$key]);
+        }
+
+        return $part;
+    }
+
     public function checkCredentials(): bool
     {
         $response = Http::withHeaders(['x-goog-api-key' => $this->apiKey])
@@ -520,6 +581,10 @@ class GeminiClient implements GenAiClient
 
     private function contentBlockToGeminiPart(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_PROVIDER_RAW) {
+            return $block->providerMetadata;
+        }
+
         if ($block->type === ContentBlock::TYPE_TOOL_CALL) {
             $call = [
                 'name' => (string) $block->toolName,
@@ -529,7 +594,8 @@ class GeminiClient implements GenAiClient
                 $call['id'] = (string) $block->toolCallId;
             }
 
-            return ['functionCall' => $call];
+            // thoughtSignature and friends ride back on the part they arrived on.
+            return $block->providerMetadata + ['functionCall' => $call];
         }
 
         if ($block->type === ContentBlock::TYPE_TOOL_RESULT) {
@@ -586,7 +652,7 @@ class GeminiClient implements GenAiClient
             return ['inline_data' => ['mime_type' => $mime, 'data' => $block->base64]];
         }
 
-        return ['text' => $block->text ?? ''];
+        return $block->providerMetadata + ['text' => $block->text ?? ''];
     }
 
     /**

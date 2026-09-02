@@ -134,6 +134,21 @@ interface GenAiClient
     public function extractToolCalls(array $response): array;
 
     /**
+     * Rebuild the assistant turn from a raw response, in the provider's own part
+     * order and keeping any state this package does not model.
+     *
+     * A tool loop has to replay the assistant turn before its results, and
+     * reconstructing that turn from the flattened text + toolCalls projections
+     * silently drops two things providers care about: the interleaving of text
+     * and calls, and opaque per-part state such as a Gemini thought signature.
+     * Both only fail on the *next* request, as a provider validation error.
+     *
+     * @param  array<string, mixed>  $response
+     * @return array{role: string, content: list<ContentBlock>}
+     */
+    public function extractAssistantMessage(array $response): array;
+
+    /**
      * Verify that the configured credentials are accepted by the provider.
      *
      * Makes the cheapest available read-only API call (a model-list endpoint)

@@ -53,7 +53,8 @@ class ToolLoopTest extends TestCase
             ]]]],
         ]);
 
-        // Gemini correlates by name; an absent id is expected, not a failure.
+        // Gemini matches a response to its call by name; it sends an id only for
+        // parallel calls, so an absent one is expected rather than a failure.
         $this->assertSame('', $calls[0]['id']);
         $this->assertSame('get_weather', $calls[0]['name']);
     }
@@ -147,7 +148,7 @@ class ToolLoopTest extends TestCase
             return ($assistant['role'] ?? '') === 'model'
                 && ($assistant['parts'][0]['functionCall']['name'] ?? '') === 'get_weather'
                 && ($user['role'] ?? '') === 'user'
-                // Gemini matches the response to the call by name.
+                // Gemini matches the response to the call by name (plus the id, when it sent one).
                 && ($user['parts'][0]['functionResponse']['name'] ?? '') === 'get_weather'
                 && ($user['parts'][0]['functionResponse']['response'] ?? []) === ['temp_c' => 12];
         });

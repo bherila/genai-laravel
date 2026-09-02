@@ -165,6 +165,7 @@ final class GenAiRequest
             toolCalls: $this->client->extractToolCalls($raw),
             usage: $this->client->extractUsage($raw),
             raw: $raw,
+            assistantMessage: $this->client->extractAssistantMessage($raw),
         );
     }
 

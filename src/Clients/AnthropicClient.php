@@ -24,7 +24,8 @@ use Illuminate\Support\Facades\Log;
  * Anthropic Messages API implementation of GenAiClient.
  *
  * Uses the direct Anthropic API (api.anthropic.com), not AWS Bedrock.
- * Files must be embedded as base64 inline content blocks — supportsFileApi() is false.
+ * Files can be sent inline as base64 content blocks or uploaded to the Files API
+ * and referenced by id — supportsFileApi() is true.
  *
  * ToolConfig is translated to Anthropic tools + tool_choice format.
  * ContentBlock objects are converted to Anthropic content block format.
@@ -434,6 +435,62 @@ class AnthropicClient implements GenAiClient
         return $calls;
     }
 
+    /**
+     * Replays the assistant turn in Anthropic's own block order. Blocks this
+     * package does not model — `thinking` and its signature above all — are kept
+     * verbatim, because dropping them invalidates the turn on the next request.
+     *
+     * @param  array<string, mixed>  $response
+     * @return array{role: string, content: list<ContentBlock>}
+     */
+    public function extractAssistantMessage(array $response): array
+    {
+        $content = [];
+
+        foreach ($response['content'] ?? [] as $block) {
+            if (! is_array($block)) {
+                continue;
+            }
+
+            $type = $block['type'] ?? '';
+
+            if ($type === 'text' && is_string($block['text'] ?? null)) {
+                $content[] = ContentBlock::text($block['text'], self::blockMetadata($block, ['type', 'text']));
+
+                continue;
+            }
+
+            if ($type === 'tool_use') {
+                $content[] = ContentBlock::toolCall(
+                    id: (string) ($block['id'] ?? ''),
+                    name: (string) ($block['name'] ?? ''),
+                    input: is_array($block['input'] ?? null) ? $block['input'] : [],
+                    providerMetadata: self::blockMetadata($block, ['type', 'id', 'name', 'input']),
+                );
+
+                continue;
+            }
+
+            $content[] = ContentBlock::providerRaw($block);
+        }
+
+        return ['role' => 'assistant', 'content' => $content];
+    }
+
+    /**
+     * @param  array<string, mixed>  $block
+     * @param  list<string>  $modelled
+     * @return array<string, mixed>
+     */
+    private static function blockMetadata(array $block, array $modelled): array
+    {
+        foreach ($modelled as $key) {
+            unset($block[$key]);
+        }
+
+        return $block;
+    }
+
     public function checkCredentials(): bool
     {
         $response = $this->http->get(self::API_BASE.'/v1/models', ['limit' => 1]);
@@ -552,8 +609,12 @@ class AnthropicClient implements GenAiClient
 
     private function contentBlockToAnthropic(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_PROVIDER_RAW) {
+            return $block->providerMetadata;
+        }
+
         if ($block->type === ContentBlock::TYPE_TOOL_CALL) {
-            return [
+            return $block->providerMetadata + [
                 'type' => 'tool_use',
                 'id' => (string) $block->toolCallId,
                 'name' => (string) $block->toolName,
@@ -677,7 +738,7 @@ class AnthropicClient implements GenAiClient
             ));
         }
 
-        return ['type' => 'text', 'text' => $block->text ?? ''];
+        return $block->providerMetadata + ['type' => 'text', 'text' => $block->text ?? ''];
     }
 
     /**

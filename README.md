@@ -153,12 +153,14 @@ and a neutral way to express the result. All three are provider-agnostic:
 ```php
 $messages = [['role' => 'user', 'content' => [ContentBlock::text($prompt)]]];
 
-$ask = fn () => GenAiRequest::with($client)
-    ->messages($messages)
+// Note the parameter: an arrow function captures by value at definition, so a
+// closure over $messages would resend the first turn forever.
+$ask = static fn (array $history) => GenAiRequest::with($client)
+    ->messages($history)
     ->tools($toolConfig)
     ->generate();
 
-$response = $ask();
+$response = $ask($messages);
 
 while ($response->hasToolCalls()) {
     $messages[] = $response->assistantMessage();
@@ -169,7 +171,7 @@ while ($response->hasToolCalls()) {
     }
 
     $messages[] = ['role' => 'user', 'content' => $results];
-    $response = $ask();
+    $response = $ask($messages);
 }
 
 echo $response->text;
@@ -177,13 +179,22 @@ echo $response->text;
 
 `ContentBlock::toolResultFor()` carries both the call ID and the function name,
 because Anthropic and Bedrock correlate results by ID while Gemini correlates by
-name — one message, three wire formats:
+name (echoing the ID back when the model sent one) — one message, three wire
+formats:
 
 | | Call | Result |
 |---|---|---|
 | Anthropic | `tool_use` | `tool_result` + `tool_use_id` |
 | Bedrock | `toolUse` | `toolResult` + `toolUseId` + `status` |
-| Gemini | `functionCall` | `functionResponse` matched by `name` |
+| Gemini | `functionCall` | `functionResponse` matched by `name`, plus `id` when the model sent one |
+
+`$response->assistantMessage()` returns the assistant turn **as the provider sent
+it** — original part order, and any opaque per-part state the provider attached
+(a Gemini `thoughtSignature`, an Anthropic `thinking` block and its signature, a
+Bedrock `reasoningContent` block). That matters because several providers reject
+a later turn whose history dropped that state, and the failure surfaces on the
+*next* request rather than where the loss happened. Rebuilding the turn yourself
+from `->text` and `->toolCalls` loses it; use `assistantMessage()`.
 
 A tool that failed is `ContentBlock::toolResultFor($call, $message, isError: true)`,
 which becomes Anthropic's `is_error`, Bedrock's `status: "error"`, or a Gemini

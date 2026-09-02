@@ -25,8 +25,15 @@ use Bherila\GenAiLaravel\Exceptions\GenAiException;
  *       credentials: new GeminiCredentials(apiKey: $user->gemini_key),
  *   );
  *
- * Anything the credentials leave null (timeout, max tokens, response MIME type,
- * and the model unless overridden) still comes from `genai.providers.*`.
+ * Secrets never mix. When a credentials object is supplied it is authoritative
+ * for every secret it carries — API key, bearer token, session token — and an
+ * empty one is an error rather than a silent fall back to the deployment's
+ * credentials. Only non-secret settings (model, region, timeout, max tokens,
+ * response MIME type) inherit from `genai.providers.*` when left null.
+ *
+ * That boundary matters beyond tidiness: Anthropic Files objects are scoped to
+ * the API key's workspace, so a tenant request that silently borrowed the
+ * deployment key would upload that tenant's document into the shared workspace.
  */
 class GenAiClientFactory
 {
@@ -60,11 +67,7 @@ class GenAiClientFactory
     private static function makeGemini(?GeminiCredentials $credentials): GeminiClient
     {
         $cfg = config('genai.providers.gemini', []);
-        $apiKey = self::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
-
-        if ($apiKey === '') {
-            throw new GenAiException('genai.providers.gemini.api_key is not set.');
-        }
+        $apiKey = self::secret('gemini', 'api_key', $credentials?->apiKey, $cfg['api_key'] ?? null);
 
         return new GeminiClient(
             apiKey: $apiKey,
@@ -77,17 +80,19 @@ class GenAiClientFactory
     private static function makeBedrock(?BedrockCredentials $credentials): BedrockClient
     {
         $cfg = config('genai.providers.bedrock', []);
-        $apiKey = self::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
+        $apiKey = self::secret('bedrock', 'api_key', $credentials?->apiKey, $cfg['api_key'] ?? null);
 
-        if ($apiKey === '') {
-            throw new GenAiException('genai.providers.bedrock.api_key is not set.');
-        }
+        // A tenant's bearer token must never be paired with the deployment's STS
+        // session token: they are halves of one credential.
+        $sessionToken = $credentials !== null
+            ? ($credentials->sessionToken ?? '')
+            : (is_string($cfg['session_token'] ?? null) ? $cfg['session_token'] : '');
 
         return new BedrockClient(
             apiKey: $apiKey,
             modelId: self::pick($credentials?->model, $cfg['model'] ?? null, 'us.anthropic.claude-haiku-4-5-20251001-v1:0'),
             region: self::pick($credentials?->region, $cfg['region'] ?? null, 'us-east-1'),
-            sessionToken: self::pick($credentials?->sessionToken, $cfg['session_token'] ?? null, ''),
+            sessionToken: $sessionToken,
             timeout: (int) ($cfg['timeout'] ?? 240),
         );
     }
@@ -95,11 +100,7 @@ class GenAiClientFactory
     private static function makeAnthropic(?AnthropicCredentials $credentials): AnthropicClient
     {
         $cfg = config('genai.providers.anthropic', []);
-        $apiKey = self::pick($credentials?->apiKey, $cfg['api_key'] ?? null, '');
-
-        if ($apiKey === '') {
-            throw new GenAiException('genai.providers.anthropic.api_key is not set.');
-        }
+        $apiKey = self::secret('anthropic', 'api_key', $credentials?->apiKey, $cfg['api_key'] ?? null);
 
         return new AnthropicClient(
             apiKey: $apiKey,
@@ -110,7 +111,39 @@ class GenAiClientFactory
     }
 
     /**
-     * Supplied credentials win over config, and config over the package default.
+     * Resolve one secret. Supplied credentials are authoritative: when a
+     * credentials object is present its value is used or the call fails, and
+     * config is never consulted as a fallback.
+     *
+     * @throws GenAiException
+     */
+    private static function secret(string $provider, string $key, ?string $supplied, mixed $configured): string
+    {
+        if ($supplied !== null) {
+            if ($supplied === '') {
+                throw new GenAiException(sprintf(
+                    'A non-empty %s is required when passing credentials to GenAiClientFactory::make(); '
+                    .'refusing to fall back to genai.providers.%s.%s, which belongs to the deployment '
+                    .'rather than to this caller.',
+                    $key,
+                    $provider,
+                    $key,
+                ));
+            }
+
+            return $supplied;
+        }
+
+        if (is_string($configured) && $configured !== '') {
+            return $configured;
+        }
+
+        throw new GenAiException("genai.providers.{$provider}.{$key} is not set.");
+    }
+
+    /**
+     * Resolve one non-secret setting: supplied wins over config, config over the
+     * package default. Only safe for values like model and region, never secrets.
      */
     private static function pick(?string $supplied, mixed $configured, string $default): string
     {

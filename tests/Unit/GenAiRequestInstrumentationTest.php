@@ -100,6 +100,11 @@ namespace Bherila\GenAiLaravel\Tests\Unit {
                     return [];
                 }
 
+                public function extractAssistantMessage(array $response): array
+                {
+                    return ['role' => 'assistant', 'content' => []];
+                }
+
                 public function checkCredentials(): bool
                 {
                     return true;

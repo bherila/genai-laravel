@@ -39,8 +39,21 @@ final class ContentBlock
     public const TYPE_TOOL_RESULT = 'tool_result';
 
     /**
+     * A part this package does not model, replayed to the provider verbatim.
+     *
+     * Providers attach state to assistant parts that a portable abstraction has
+     * no business interpreting but must not drop — Gemini's thought signatures,
+     * Anthropic's thinking blocks. Projecting a response down to text + tool
+     * calls and rebuilding it loses exactly this, and the loss only shows up as
+     * a provider-side validation error on the *next* turn.
+     */
+    public const TYPE_PROVIDER_RAW = 'provider_raw';
+
+    /**
      * @param  array<string, mixed>|null  $toolInput
      * @param  string|array<mixed>|null  $toolResult
+     * @param  array<string, mixed>  $providerMetadata  Opaque provider-owned keys, merged
+     *                                                  back into the emitted part unchanged.
      */
     private function __construct(
         public readonly string $type,
@@ -53,11 +66,25 @@ final class ContentBlock
         public readonly ?array $toolInput = null,
         public readonly string|array|null $toolResult = null,
         public readonly bool $isError = false,
+        public readonly array $providerMetadata = [],
     ) {}
 
-    public static function text(string $text): self
+    /**
+     * @param  array<string, mixed>  $providerMetadata  Provider keys to replay alongside the text.
+     */
+    public static function text(string $text, array $providerMetadata = []): self
     {
-        return new self(type: self::TYPE_TEXT, text: $text);
+        return new self(type: self::TYPE_TEXT, text: $text, providerMetadata: $providerMetadata);
+    }
+
+    /**
+     * A provider part replayed verbatim, for content this package does not model.
+     *
+     * @param  array<string, mixed>  $part  The part exactly as the provider sent it.
+     */
+    public static function providerRaw(array $part): self
+    {
+        return new self(type: self::TYPE_PROVIDER_RAW, providerMetadata: $part);
     }
 
     /**
@@ -95,25 +122,30 @@ final class ContentBlock
      *
      * @param  string  $id  Provider call ID, from the `id` key of an extractToolCalls() entry.
      * @param  array<string, mixed>  $input  Arguments the model passed.
+     * @param  array<string, mixed>  $providerMetadata  Opaque state that arrived on this part
+     *                                                  (e.g. a Gemini thought signature) and must
+     *                                                  be replayed on the same part.
      */
-    public static function toolCall(string $id, string $name, array $input): self
+    public static function toolCall(string $id, string $name, array $input, array $providerMetadata = []): self
     {
         return new self(
             type: self::TYPE_TOOL_CALL,
             toolCallId: $id,
             toolName: $name,
             toolInput: $input,
+            providerMetadata: $providerMetadata,
         );
     }
 
     /**
      * The result of executing a tool, sent back to the model.
      *
-     * $toolName matters: Anthropic and Bedrock correlate results by call ID,
-     * but Gemini correlates by function name and ignores IDs entirely. Supplying
-     * both keeps one message portable across all three — which is the whole point
-     * of building the loop out of ContentBlocks. Prefer toolResultFor(), which
-     * fills both in from the call it is answering.
+     * Correlation differs by provider: Anthropic and Bedrock match a result to
+     * its call by ID, while Gemini matches by function name and additionally
+     * expects the call's `id` echoed back when the model sent one. Supplying both
+     * keeps one message portable across all three — which is the whole point of
+     * building the loop out of ContentBlocks. Prefer toolResultFor(), which fills
+     * both in from the call it is answering.
      *
      * @param  string|array<mixed>  $result  Text, or a structured payload to hand back.
      * @param  bool  $isError  Marks the tool as having failed, so the model can recover.
@@ -169,10 +201,18 @@ final class ContentBlock
      */
     public function toolResultAsArray(): array
     {
-        if (is_array($this->toolResult)) {
+        // An error has to surface as {"error": …} whatever shape the result took,
+        // otherwise a failed tool is indistinguishable from a successful one.
+        if ($this->isError) {
+            return ['error' => $this->toolResult];
+        }
+
+        // A JSON *array* is not a valid functionResponse.response — only an
+        // object is — so a list gets wrapped rather than passed through.
+        if (is_array($this->toolResult) && ! array_is_list($this->toolResult)) {
             return $this->toolResult;
         }
 
-        return [$this->isError ? 'error' : 'result' => (string) $this->toolResult];
+        return ['result' => $this->toolResult];
     }
 }

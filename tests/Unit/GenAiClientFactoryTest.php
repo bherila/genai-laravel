@@ -150,6 +150,83 @@ class GenAiClientFactoryTest extends TestCase
         $this->assertSame('anthropic', $client->provider());
     }
 
+    // ── supplied credentials are authoritative for secrets ───────────────────
+
+    public function test_empty_gemini_credentials_never_borrow_the_deployment_key(): void
+    {
+        config(['genai.providers.gemini.api_key' => 'deployment-key']);
+
+        Http::fake();
+
+        $this->expectException(GenAiException::class);
+        $this->expectExceptionMessageMatches('/refusing to fall back/');
+
+        GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: ''));
+    }
+
+    public function test_empty_anthropic_credentials_never_borrow_the_deployment_key(): void
+    {
+        config(['genai.providers.anthropic.api_key' => 'deployment-key']);
+
+        $this->expectException(GenAiException::class);
+
+        GenAiClientFactory::make(credentials: new AnthropicCredentials(apiKey: ''));
+    }
+
+    public function test_a_missing_tenant_key_fails_before_any_request_is_sent(): void
+    {
+        config(['genai.providers.gemini.api_key' => 'deployment-key']);
+
+        Http::fake();
+
+        try {
+            GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: ''));
+            $this->fail('Expected GenAiException.');
+        } catch (GenAiException) {
+            // expected
+        }
+
+        Http::assertNothingSent();
+    }
+
+    /**
+     * A bearer token and its STS session token are halves of one credential —
+     * pairing a tenant's token with the deployment's would be a broken request at
+     * best and a cross-tenant call at worst.
+     */
+    public function test_tenant_bedrock_credentials_do_not_inherit_the_global_session_token(): void
+    {
+        config([
+            'genai.providers.bedrock.api_key' => 'deployment-token',
+            'genai.providers.bedrock.session_token' => 'deployment-session-token',
+        ]);
+
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        GenAiClientFactory::make(credentials: new BedrockCredentials(apiKey: 'tenant-token'))
+            ->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        Http::assertSent(function (Request $req) {
+            return $req->header('Authorization')[0] === 'Bearer tenant-token'
+                && $req->header('X-Amz-Security-Token') === [];
+        });
+    }
+
+    public function test_config_session_token_still_applies_without_credentials(): void
+    {
+        config([
+            'genai.providers.bedrock.api_key' => 'deployment-token',
+            'genai.providers.bedrock.session_token' => 'deployment-session-token',
+        ]);
+
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        GenAiClientFactory::make('bedrock')
+            ->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+
+        Http::assertSent(fn (Request $req) => $req->header('X-Amz-Security-Token')[0] === 'deployment-session-token');
+    }
+
     /**
      * @return array<string, mixed>
      */

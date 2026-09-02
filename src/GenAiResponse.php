@@ -15,12 +15,15 @@ final class GenAiResponse
      * @param  list<array{id: string, name: string, input: array<string, mixed>}>  $toolCalls  Tool/function calls made by the model. `id` correlates a result back to its call (empty on providers that match by name).
      * @param  Usage  $usage  Normalised token-usage data.
      * @param  array<string, mixed>  $raw  Provider-specific raw response (for advanced use / debugging).
+     * @param  array{role: string, content: list<ContentBlock>}|null  $assistantMessage  The assistant turn
+     *        as the provider sent it, preserved by the client. Null only for responses built by hand.
      */
     public function __construct(
         public readonly string $text,
         public readonly array $toolCalls,
         public readonly Usage $usage,
         public readonly array $raw,
+        private readonly ?array $assistantMessage = null,
     ) {}
 
     public function hasToolCalls(): bool
@@ -79,6 +82,14 @@ final class GenAiResponse
      */
     public function assistantMessage(): array
     {
+        // Prefer the turn the client preserved: it keeps the provider's own part
+        // order and any opaque per-part state. The reconstruction below is a
+        // fallback for responses built by hand, and is lossy by construction —
+        // it cannot recover what the projections dropped.
+        if ($this->assistantMessage !== null) {
+            return $this->assistantMessage;
+        }
+
         $content = [];
 
         if ($this->text !== '') {
