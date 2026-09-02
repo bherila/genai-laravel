@@ -563,8 +563,11 @@ use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 
 $limits = new ConversionLimits(maxInputBytes: 8 * 1024 * 1024, maxSeconds: 15.0);
 
-SpreadsheetToText::convert($base64, $mime, $limits);      // one conversion
-new AnthropicClient(apiKey: $key, conversionLimits: $limits); // every conversion this client runs
+// One conversion.
+SpreadsheetToText::convert($base64, $mime, $limits);
+
+// Every conversion this client runs on your behalf.
+$client = new AnthropicClient(apiKey: $key, conversionLimits: $limits);
 ```
 
 Spreadsheet extraction truncates rather than throws when it hits a row, cell,
