@@ -4,20 +4,20 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "28b0bd84440947b0f8d30ecf6aca6d65",
+    "content-hash": "eb0603cec936d21b5104536792abf80e",
     "packages": [
         {
             "name": "bherila/mcp-laravel-bridge",
-            "version": "v0.1.1",
+            "version": "v0.2.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/bherila/mcp-laravel-bridge.git",
-                "reference": "886d1b786131b4aa03a0d5a335304bc81ba66a58"
+                "reference": "89736139aa7f1323bbe9dc361e239b175ac1fbe6"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/886d1b786131b4aa03a0d5a335304bc81ba66a58",
-                "reference": "886d1b786131b4aa03a0d5a335304bc81ba66a58",
+                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/89736139aa7f1323bbe9dc361e239b175ac1fbe6",
+                "reference": "89736139aa7f1323bbe9dc361e239b175ac1fbe6",
                 "shasum": ""
             },
             "require": {
@@ -48,9 +48,9 @@
             "description": "Shared MCP-over-REST infrastructure for Laravel applications.",
             "support": {
                 "issues": "https://github.com/bherila/mcp-laravel-bridge/issues",
-                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.1.1"
+                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.2.0"
             },
-            "time": "2026-09-04T17:06:59+00:00"
+            "time": "2026-09-15T09:52:12+00:00"
         },
         {
             "name": "brick/math",

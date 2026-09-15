@@ -36,6 +36,7 @@ final readonly class GenAiMcpServerFactory
                 description: $definition->description,
                 annotations: new ToolAnnotations(readOnlyHint: $definition->readOnly, destructiveHint: false, idempotentHint: $definition->idempotent, openWorldHint: false),
                 inputSchema: $this->schemas->for($definition->handler),
+                outputSchema: $this->catalog->outputSchema($definition->name),
             );
         }
 

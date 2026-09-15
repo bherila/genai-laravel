@@ -14,7 +14,12 @@ use Bherila\GenAiLaravel\Mcp\Auth\PersonalTokenMailboxAccessResolver;
 use Bherila\GenAiLaravel\Mcp\Commands\DeliverMcpCompletions;
 use Bherila\GenAiLaravel\Mcp\Commands\PruneMcpRequests;
 use Bherila\GenAiLaravel\Mcp\Delivery\RejectingCompletionDelivery;
+use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\Http\McpNoStore;
+use Bherila\McpLaravelBridge\Http\McpHttpPolicy;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 
 class GenAiServiceProvider extends ServiceProvider
@@ -36,6 +41,14 @@ class GenAiServiceProvider extends ServiceProvider
             : new DenyAllMailboxAccessResolver);
         $this->app->bind(AttachmentResolver::class, StorageAttachmentResolver::class);
         $this->app->bind(CompletionDelivery::class, RejectingCompletionDelivery::class);
+        if (! $this->app->bound(McpHttpPolicy::class)) {
+            $this->app->singleton(McpHttpPolicy::class, fn () => new McpHttpPolicy(
+                allowedOrigins: fn (): array => array_values(config('genai.mcp.server.allowed_origins', [])),
+                allowedHosts: fn (): array => array_values(config('genai.mcp.server.allowed_hosts', [])),
+                maxRequestBodyBytes: (int) config('genai.mcp.server.max_body_bytes', 262144),
+                maxResponseBodyBytes: (int) config('genai.mcp.server.max_response_body_bytes', 1048576),
+            ));
+        }
     }
 
     public function boot(): void
@@ -51,6 +64,13 @@ class GenAiServiceProvider extends ServiceProvider
         }
 
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+        RateLimiter::for('genai-mcp', function (Request $request): Limit {
+            $context = $request->attributes->get(ExecutionContext::class);
+            $identity = $context instanceof ExecutionContext ? $context->principalKey : (string) $request->ip();
+
+            return Limit::perMinute((int) config('genai.mcp.rest.requests_per_minute', 60))
+                ->by('genai-mcp:'.hash('sha256', $identity));
+        });
         $this->app['router']->aliasMiddleware('genai.mcp.auth', McpAuthenticate::class);
         $this->app['router']->aliasMiddleware('genai.mcp.no_store', McpNoStore::class);
         if ((bool) config('genai.mcp.enabled', false) && (bool) config('genai.mcp.rest.enabled', true)) {

@@ -7,6 +7,7 @@ use Bherila\GenAiLaravel\Mcp\Enums\McpRequestStatus;
 use Bherila\GenAiLaravel\Mcp\Events\McpRequestCancelled;
 use Bherila\GenAiLaravel\Mcp\Events\McpRequestClaimed;
 use Bherila\GenAiLaravel\Mcp\Events\McpRequestCompleted;
+use Bherila\GenAiLaravel\Mcp\Events\McpRequestExpired;
 use Bherila\GenAiLaravel\Mcp\Events\McpRequestFailed;
 use Bherila\GenAiLaravel\Mcp\Events\McpRequestQueued;
 use Bherila\GenAiLaravel\Mcp\Exceptions\McpQueueException;
@@ -35,19 +36,28 @@ final readonly class McpQueueService
         if (! $mailbox->enabled) {
             throw new McpQueueException('Mailbox is disabled.', 409);
         }
-        $options ??= new EnqueueOptions;
+        $options ??= new EnqueueOptions(maxAttempts: (int) config('genai.mcp.max_attempts', 3));
         if (! preg_match('/^[A-Za-z0-9._-]{1,80}$/', $options->queue)) {
             throw new McpQueueException('Queue name is invalid.', 422);
         }
+        if ($options->idempotencyKey !== null && ($options->idempotencyKey === '' || strlen($options->idempotencyKey) > 191)) {
+            throw new McpQueueException('Enqueue idempotency key is invalid.', 422);
+        }
+        if ($options->priority < -2147483648 || $options->priority > 2147483647) {
+            throw new McpQueueException('Priority is outside the supported integer range.', 422);
+        }
         if ($options->maxAttempts < 1 || $options->maxAttempts > 100) {
             throw new McpQueueException('maxAttempts must be between 1 and 100.', 422);
+        }
+        if ($options->expiresAt !== null && $options->expiresAt <= ($options->availableAt ?? now())) {
+            throw new McpQueueException('expiresAt must be later than availableAt.', 422);
         }
 
         $raw = $payload->toArray();
         foreach ($raw['tools'] as $tool) {
             $this->schemas->assertPortable($tool['input_schema']);
         }
-        $this->assertPayloadBounds($raw);
+        $this->assertPayloadBounds($raw, $options->metadata);
         $enqueueHash = hash('sha256', $this->canonicalJson([
             'payload' => $raw, 'queue' => $options->queue, 'priority' => $options->priority,
             'available_at' => $options->availableAt?->format(DATE_ATOM), 'expires_at' => $options->expiresAt?->format(DATE_ATOM),
@@ -57,6 +67,13 @@ final readonly class McpQueueService
         $ownedPaths = [];
         try {
             return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $enqueueHash, &$ownedPaths): McpRequest {
+                $mailbox = McpMailbox::query()->lockForUpdate()->find($mailbox->id);
+                if ($mailbox === null) {
+                    throw new McpQueueException('Mailbox not found.', 404);
+                }
+                if (! $mailbox->enabled) {
+                    throw new McpQueueException('Mailbox is disabled.', 409);
+                }
                 if ($options->idempotencyKey !== null) {
                     $existing = McpRequest::query()->where('mailbox_id', $mailbox->id)
                         ->where('idempotency_key', $options->idempotencyKey)->lockForUpdate()->first();
@@ -95,47 +112,64 @@ final readonly class McpQueueService
     /** @return array<string, int> */
     public function status(ExecutionContext $context, ?string $queue = null): array
     {
-        $query = McpRequest::query()->whereIn('mailbox_id', $this->authorizedMailboxIds($context, 'genai:read'));
-        if ($queue !== null) {
-            $query->where('queue', $queue);
-        }
-        $rows = $query->selectRaw('status, count(*) as aggregate')->groupBy('status')->pluck('aggregate', 'status');
+        $this->assertQueueFilter($queue);
 
-        return collect(McpRequestStatus::cases())->mapWithKeys(fn ($case) => [$case->value => (int) ($rows[$case->value] ?? 0)])->all();
+        return $this->db->connection()->transaction(function () use ($context, $queue): array {
+            $this->expireRequests($context, $queue);
+            $counts = collect(McpRequestStatus::cases())->mapWithKeys(fn ($case) => [$case->value => 0])->all();
+            McpRequest::query()->with('mailbox')->whereIn('mailbox_id', $context->mailboxIds)
+                ->when($queue !== null, fn ($query) => $query->where('queue', $queue))
+                ->lazyById()->each(function (McpRequest $request) use ($context, &$counts): void {
+                    if ($this->access->authorize($context, $request->mailbox, 'genai:read', $request)) {
+                        $counts[$request->status->value]++;
+                    }
+                });
+
+            return $counts;
+        });
     }
 
     /** @return array<string, mixed>|null */
     public function claim(ExecutionContext $context, ?string $queue = null, ?string $idempotencyKey = null): ?array
     {
+        $this->assertQueueFilter($queue);
         if ($idempotencyKey !== null && (strlen($idempotencyKey) > 191 || $idempotencyKey === '')) {
             throw new McpQueueException('Claim idempotency key is invalid.', 422);
         }
 
         return $this->db->connection()->transaction(function () use ($context, $queue, $idempotencyKey): ?array {
+            $this->expireRequests($context, $queue);
             $this->failExhaustedLeases($context, $queue);
             if ($idempotencyKey !== null) {
                 $receipt = McpClaimReceipt::query()->whereIn('mailbox_id', $context->mailboxIds)
                     ->where('principal_key', $context->principalKey)->where('idempotency_key', $idempotencyKey)->lockForUpdate()->first();
                 if ($receipt !== null && $receipt->expires_at->isFuture()) {
-                    $request = McpRequest::query()->with('attachments')->find($receipt->request_id);
-                    if ($request?->status === McpRequestStatus::Leased && $request->lease_expires_at?->isFuture()) {
+                    $request = McpRequest::query()->with(['attachments', 'mailbox'])->find($receipt->request_id);
+                    if ($request?->status === McpRequestStatus::Leased && $request->lease_expires_at?->isFuture()
+                        && $this->access->authorize($context, $request->mailbox, 'genai:work', $request)) {
                         return $this->envelope($request, $this->leaseTokens->forReceipt($receipt));
                     }
                 }
                 $receipt?->delete();
             }
 
-            $candidates = McpRequest::query()->with(['mailbox', 'attachments'])
-                ->whereIn('mailbox_id', $context->mailboxIds)
-                ->when($queue !== null, fn ($q) => $q->where('queue', $queue))
-                ->where('available_at', '<=', now())
-                ->where(fn ($q) => $q->where('status', McpRequestStatus::Pending->value)
-                    ->orWhere(fn ($q) => $q->where('status', McpRequestStatus::Leased->value)->where('lease_expires_at', '<=', now())))
-                ->where(fn ($q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', now()))
-                ->whereColumn('attempt_count', '<', 'max_attempts')
-                ->orderByDesc('priority')->orderBy('available_at')->orderBy('created_at')
-                ->lockForUpdate()->limit(25)->get();
-            $request = $candidates->first(fn (McpRequest $item): bool => $this->access->authorize($context, $item->mailbox, 'genai:work', $item));
+            $request = null;
+            for ($page = 1; $request === null; $page++) {
+                $candidates = McpRequest::query()->with(['mailbox', 'attachments'])
+                    ->whereIn('mailbox_id', $context->mailboxIds)
+                    ->when($queue !== null, fn ($q) => $q->where('queue', $queue))
+                    ->where('available_at', '<=', now())
+                    ->where(fn ($q) => $q->where('status', McpRequestStatus::Pending->value)
+                        ->orWhere(fn ($q) => $q->where('status', McpRequestStatus::Leased->value)->where('lease_expires_at', '<=', now())))
+                    ->where(fn ($q) => $q->whereNull('expires_at')->orWhere('expires_at', '>', now()))
+                    ->whereColumn('attempt_count', '<', 'max_attempts')
+                    ->orderByDesc('priority')->orderBy('available_at')->orderBy('created_at')->orderBy('id')
+                    ->lockForUpdate()->forPage($page, 25)->get();
+                $request = $candidates->first(fn (McpRequest $item): bool => $this->access->authorize($context, $item->mailbox, 'genai:work', $item));
+                if ($candidates->count() < 25) {
+                    break;
+                }
+            }
             if ($request === null) {
                 return null;
             }
@@ -149,9 +183,13 @@ final readonly class McpQueueService
             }
             $plain = $receipt === null ? $this->leaseTokens->random() : $this->leaseTokens->forReceipt($receipt);
             $leaseSeconds = (int) config('genai.mcp.lease.seconds', 900);
+            $leaseExpiresAt = now()->addSeconds($leaseSeconds);
+            if ($request->expires_at !== null && $leaseExpiresAt->greaterThan($request->expires_at)) {
+                $leaseExpiresAt = $request->expires_at;
+            }
             $request->forceFill([
                 'status' => McpRequestStatus::Leased, 'attempt_count' => $request->attempt_count + 1,
-                'leased_at' => now(), 'lease_expires_at' => now()->addSeconds($leaseSeconds),
+                'leased_at' => now(), 'lease_expires_at' => $leaseExpiresAt,
                 'lease_token_hash' => hash('sha256', $plain), 'lease_principal' => $context->principalKey,
             ])->save();
             if ($idempotencyKey !== null) {
@@ -199,6 +237,11 @@ final readonly class McpQueueService
         }
         if (array_diff(array_keys($executor), ['client', 'model']) !== []) {
             throw new McpQueueException('Unknown executor fields are not allowed.', 422);
+        }
+        foreach ($executor as $value) {
+            if (! is_string($value)) {
+                throw new McpQueueException('Executor metadata values must be strings.', 422);
+            }
         }
         $response = ['text' => $response['text'] ?? '', 'tool_calls' => $response['tool_calls'] ?? []];
         $canonical = $this->canonicalJson(['response' => $response, 'executor' => $executor]);
@@ -305,12 +348,24 @@ final readonly class McpQueueService
         return $request;
     }
 
-    /** @return list<string> */
-    private function authorizedMailboxIds(ExecutionContext $context, string $ability): array
+    private function expireRequests(ExecutionContext $context, ?string $queue): void
     {
-        return McpMailbox::query()->whereIn('id', $context->mailboxIds)->get()
-            ->filter(fn (McpMailbox $mailbox): bool => $this->access->authorize($context, $mailbox, $ability))
-            ->pluck('id')->values()->all();
+        $requests = McpRequest::query()->with('mailbox')->whereIn('mailbox_id', $context->mailboxIds)
+            ->when($queue !== null, fn ($query) => $query->where('queue', $queue))
+            ->whereIn('status', [McpRequestStatus::Pending->value, McpRequestStatus::Leased->value])
+            ->whereNotNull('expires_at')->where('expires_at', '<=', now())->lockForUpdate()->get();
+        foreach ($requests as $request) {
+            if (! $this->access->authorize($context, $request->mailbox, 'genai:read', $request)) {
+                continue;
+            }
+            $request->forceFill([
+                'status' => McpRequestStatus::Expired,
+                'lease_token_hash' => null,
+                'lease_expires_at' => null,
+                'lease_principal' => null,
+            ])->save();
+            $this->db->connection()->afterCommit(fn () => event(new McpRequestExpired($request->id)));
+        }
     }
 
     private function failExhaustedLeases(ExecutionContext $context, ?string $queue): void
@@ -341,6 +396,9 @@ final readonly class McpQueueService
 
     private function assertLiveLease(McpRequest $request, ExecutionContext $context, string $token): void
     {
+        if ($request->expires_at?->isPast() || $request->status === McpRequestStatus::Expired) {
+            throw new McpQueueException('Request has expired.', 410);
+        }
         if ($request->status !== McpRequestStatus::Leased || $request->lease_expires_at?->isPast()
             || $request->lease_principal !== $context->principalKey
             || ! hash_equals((string) $request->lease_token_hash, hash('sha256', $token))) {
@@ -348,10 +406,13 @@ final readonly class McpQueueService
         }
     }
 
-    /** @param array<string, mixed> $payload */
-    private function assertPayloadBounds(array $payload): void
+    /**
+     * @param  array<string, mixed>  $payload
+     * @param  array<string, mixed>  $metadata
+     */
+    private function assertPayloadBounds(array $payload, array $metadata): void
     {
-        $bytes = strlen(json_encode($payload, JSON_THROW_ON_ERROR));
+        $bytes = strlen(json_encode(['payload' => $payload, 'metadata' => $metadata], JSON_THROW_ON_ERROR));
         if ($bytes > (int) config('genai.mcp.limits.max_enqueue_json_bytes', 2097152)) {
             throw new McpQueueException('Request manifest exceeds the configured limit.', 413);
         }
@@ -360,11 +421,37 @@ final readonly class McpQueueService
             throw new McpQueueException('Too many tool definitions.', 413);
         }
         $names = array_column($tools, 'name');
+        foreach ($names as $name) {
+            if (! is_string($name) || ! preg_match('/^[A-Za-z0-9_.-]{1,128}$/', $name)) {
+                throw new McpQueueException('Tool names must be portable identifiers of at most 128 characters.', 422);
+            }
+        }
         if (count($names) !== count(array_unique($names))) {
             throw new McpQueueException('Tool names must be unique.', 422);
         }
         if (($payload['tool_choice']['type'] ?? null) === 'tool' && ! in_array($payload['tool_choice']['name'] ?? null, $names, true)) {
             throw new McpQueueException('The forced tool choice is not defined.', 422);
+        }
+        $inputCharacters = mb_strlen((string) ($payload['system'] ?? ''));
+        foreach ($payload['messages'] ?? [] as $message) {
+            if (! in_array($message['role'] ?? null, ['user', 'assistant'], true)
+                || ! isset($message['content']) || ! is_array($message['content']) || ! array_is_list($message['content'])) {
+                throw new McpQueueException('Messages must have a portable user/assistant role and a content-block list.', 422);
+            }
+            foreach ($message['content'] as $block) {
+                if (! is_array($block) || ! in_array($block['type'] ?? null, ['text', 'inline_attachment', 'stored_attachment', 'tool_call', 'tool_result'], true)) {
+                    throw new McpQueueException('Message contains an unsupported content block.', 422);
+                }
+                if ($block['type'] === 'text') {
+                    if (! is_string($block['text'] ?? null)) {
+                        throw new McpQueueException('Text content blocks require text.', 422);
+                    }
+                    $inputCharacters += mb_strlen($block['text']);
+                }
+            }
+        }
+        if ($inputCharacters > (int) config('genai.mcp.limits.max_input_text_chars', 500000)) {
+            throw new McpQueueException('Request text exceeds the configured limit.', 413);
         }
     }
 
@@ -422,12 +509,19 @@ final readonly class McpQueueService
         }
     }
 
+    private function assertQueueFilter(?string $queue): void
+    {
+        if ($queue !== null && ! preg_match('/^[A-Za-z0-9._-]{1,80}$/', $queue)) {
+            throw new McpQueueException('Queue name is invalid.', 422);
+        }
+    }
+
     /** @return array<string, mixed> */
     private function envelope(McpRequest $request, string $plain): array
     {
         $expires = $request->lease_expires_at;
 
-        return ['empty' => false, 'request' => [
+        $envelope = ['empty' => false, 'request' => [
             'id' => $request->id, 'queue' => $request->queue, 'attempt' => $request->attempt_count,
             'lease_token' => $plain, 'lease_expires_at' => $expires->toIso8601String(),
             'input' => ['system' => $request->payload['system'], 'messages' => $request->payload['messages']],
@@ -441,6 +535,11 @@ final readonly class McpQueueService
             'tools' => $request->payload['tools'], 'tool_choice' => $request->payload['tool_choice'],
             'submission_schema' => $this->schemas->forPayload($request->payload),
         ]];
+        if (strlen(json_encode($envelope, JSON_THROW_ON_ERROR)) > (int) config('genai.mcp.limits.max_claim_json_bytes', 3145728)) {
+            throw new McpQueueException('Claim envelope exceeds the configured limit.', 413);
+        }
+
+        return $envelope;
     }
 
     /** @return array<string, mixed> */
@@ -460,7 +559,12 @@ final readonly class McpQueueService
 
     private function backoffSeconds(int $attempt): int
     {
-        return min(3600, 30 * (2 ** max(0, $attempt - 1)));
+        $configured = array_values(array_filter(config('genai.mcp.retry_backoff_seconds', [60, 300, 1800]), 'is_int'));
+        if ($configured === []) {
+            return 60;
+        }
+
+        return max(1, min(86400, $configured[min(max(0, $attempt - 1), count($configured) - 1)]));
     }
 
     /** @param array<string, mixed> $data */

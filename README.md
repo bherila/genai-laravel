@@ -1,6 +1,8 @@
 # genai-laravel
 
-Provider-agnostic GenAI client for Laravel. Supports Google Gemini, AWS Bedrock (Claude), and Anthropic direct API through a single interface.
+Provider-agnostic GenAI client for Laravel. Supports Google Gemini, AWS Bedrock
+(Claude), Anthropic direct API, and asynchronous execution by a user's own
+subscription client through MCP/REST.
 
 ## Requirements
 
@@ -666,13 +668,44 @@ must recheck `genai:read` or `genai:work` plus current ownership, membership,
 subject access, revocation, and disabled-job policy on every operation. This
 package does not issue OAuth credentials. Prefer registering
 `GenAiMcpToolCatalog` in an application's existing `mcp/sdk` server so users get
-one OAuth connection and one tool catalog.
+one OAuth connection and one tool catalog. Put middleware needed to establish
+the host principal in `genai.mcp.server.middleware` and
+`genai.mcp.rest.middleware`; the package authentication resolver runs after it.
+`GenAiMcpToolCatalog::requiredScope()` maps the status tool to `genai:read` and
+all claim/mutation tools to `genai:work` for host catalog filtering.
 
 For generic CLI/REST installations only, the optional personal-token adapter can
 be enabled with `GENAI_MCP_PERSONAL_TOKENS=true`; issue a token through
 `McpTokenService`. It returns the high-entropy `genai_mcp_...` value once and
 stores only its SHA-256 hash. Tokens are mailbox-bound, scoped, expirable, and
 independently revocable. Never put a token in a query string.
+
+```php
+$plain = app(McpTokenService::class)->issue(
+    mailbox: $mailbox,
+    name: 'Personal Codex client',
+    expiresAt: now()->addMonths(3),
+);
+// Display $plain once. Later: app(McpTokenService::class)->revoke($tokenModel);
+```
+
+For a local Codex client, keep the token in the environment and reference it
+from `~/.codex/config.toml`; the value itself does not belong in the file:
+
+```toml
+[mcp_servers.genai_mailbox]
+url = "https://example.com/genai/mcp"
+bearer_token_env_var = "GENAI_MCP_TOKEN"
+```
+
+For host OAuth, configure the URL and run `codex mcp login genai_mailbox`.
+Claude Code accepts a remote HTTP server with
+`claude mcp add --transport http genai-mailbox https://example.com/genai/mcp`
+and can complete OAuth through `/mcp`; its shared `.mcp.json` also supports
+environment expansion in headers. See the current
+[Codex MCP setup](https://developers.openai.com/codex/mcp/) and
+[Claude Code MCP setup](https://docs.anthropic.com/en/docs/claude-code/mcp)
+before provisioning users because client authentication surfaces evolve.
 
 The standalone Streamable HTTP endpoint defaults to `/genai/mcp`. It uses the
 official PHP MCP SDK through `bherila/mcp-laravel-bridge`, keeps protocol
@@ -690,6 +723,34 @@ one-item claims, request status, lease renewal, completion/failure, and streamed
 attachment `GET`/`HEAD`. REST and MCP invoke the same state-transition service.
 Attachment links are short-lived signed URLs capped by the lease, but the
 signature never replaces bearer authentication. Renewal refreshes the manifest.
+Every MCP tool declares an output schema and returns both broadly compatible
+text content and the same structured object returned by REST.
+
+A REST-only scheduled runner can use the same mailbox without implementing MCP:
+
+```bash
+claim_file="$(mktemp)"
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer ${GENAI_MCP_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: ${RUN_ID}" \
+  --data '{"queue":"documents"}' \
+  https://example.com/genai/mcp/v1/claims >"${claim_file}"
+
+# Invoke the user's local subscription client with the bounded claim JSON.
+# Download each signed attachment URL with the same Authorization header.
+# Then submit normalized JSON; never post provider-native wire output.
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer ${GENAI_MCP_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data @completion.json \
+  "https://example.com/genai/mcp/v1/requests/${REQUEST_ID}/complete"
+```
+
+`completion.json` contains `lease_token`, `response` (`text` and/or
+`tool_calls`), and optional string-only `executor.client` / `executor.model`.
+Use the claim idempotency key again after a lost response; use the same completed
+payload and lease token after a lost completion response.
 
 Claims are atomic leases, not deletes. Expired leases can be reclaimed while
 attempts remain; stale executors cannot complete. `Idempotency-Key` makes REST
@@ -723,7 +784,10 @@ or its scheduler:
 Client connector authentication, raw authenticated file downloads, subscription
 permissions, and scheduling support vary by product. Test the chosen client
 flow; do not assume a hosted connector forwards OAuth to file URLs or silently
-enable URL-only access for sensitive data.
+enable URL-only access for sensitive data. The synthetic MCP, MCP+REST attachment,
+and REST-only flows are covered by package tests. Live Codex, Claude Code, and
+hosted-client account/OAuth/file-download smoke tests are not verified by this
+repository because no user account credentials are available to its test suite.
 
 ## Providers
 

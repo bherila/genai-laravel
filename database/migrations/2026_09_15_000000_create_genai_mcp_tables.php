@@ -38,7 +38,7 @@ return new class extends Migration
             $table->integer('priority')->default(0);
             $table->json('payload');
             $table->json('metadata')->nullable();
-            $table->string('idempotency_key')->nullable();
+            $table->string('idempotency_key', 191)->nullable();
             $table->char('enqueue_hash', 64)->nullable();
             $table->timestamp('available_at');
             $table->timestamp('expires_at')->nullable();

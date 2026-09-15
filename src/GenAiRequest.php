@@ -21,8 +21,9 @@ use Bherila\GenAiLaravel\Mcp\StoredAttachment;
  *   $r1   = $base->prompt('Summarise this.')->withFile($pdf1, 'application/pdf')->generate();
  *   $r2   = $base->prompt('Classify this.')->withFile($pdf2, 'application/pdf')->generate();
  *
- * Calling generate() on two different clients is also valid — pass any
- * GenAiClient implementation (Anthropic, Bedrock, Gemini) to ::with().
+ * Pass a synchronous GenAiClient to generate(), or a QueuedGenAiClient to
+ * enqueue(); mixing the two contracts fails immediately with an actionable
+ * unsupported-operation exception.
  */
 final class GenAiRequest
 {
@@ -41,7 +42,7 @@ final class GenAiRequest
     private function __construct(private readonly GenAiClient|QueuedGenAiClient $client) {}
 
     /**
-     * Create a new request bound to the given provider client.
+     * Create a new request bound to a synchronous or queued client.
      */
     public static function with(GenAiClient|QueuedGenAiClient $client): static
     {
@@ -170,6 +171,13 @@ final class GenAiRequest
             throw new GenAiUnsupportedOperationException('Queued GenAI clients are asynchronous; call enqueue() and poll the returned request.');
         }
         $messages = $this->rawMessages ?? $this->buildMessages();
+        foreach ($messages as $message) {
+            foreach ($message['content'] as $block) {
+                if ($block->type === ContentBlock::TYPE_STORED_ATTACHMENT) {
+                    throw new GenAiUnsupportedOperationException('Storage-backed attachments are available only to queued clients. Use withFile() or withFileRef() for a synchronous provider.');
+                }
+            }
+        }
         $raw = SentryGenAiTracer::trace(
             client: $this->client,
             inputMessages: $messages,

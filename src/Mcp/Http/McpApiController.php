@@ -15,7 +15,7 @@ final readonly class McpApiController
 
     public function status(Request $request): JsonResponse
     {
-        return response()->json(['counts' => $this->queue->status($this->context($request), $request->query('queue'))]);
+        return $this->respond(fn (): array => ['counts' => $this->queue->status($this->context($request), $request->query('queue'))]);
     }
 
     public function show(Request $request, string $requestId): JsonResponse
@@ -39,8 +39,12 @@ final readonly class McpApiController
     {
         return $this->respond(function () use ($request, $requestId): array {
             $this->assertKeys($request, ['lease_token']);
+            $leaseToken = $request->input('lease_token');
+            if (! is_string($leaseToken)) {
+                throw new McpQueueException('lease_token must be a string.', 422);
+            }
 
-            return $this->queue->renew($this->context($request), $requestId, (string) $request->input('lease_token'));
+            return $this->queue->renew($this->context($request), $requestId, $leaseToken);
         });
     }
 
@@ -48,11 +52,20 @@ final readonly class McpApiController
     {
         return $this->respond(function () use ($request, $requestId): array {
             $this->assertKeys($request, ['lease_token', 'response', 'executor']);
+            $response = $request->input('response');
+            $executor = $request->input('executor', []);
+            if (! is_array($response) || ! is_array($executor)) {
+                throw new McpQueueException('response and executor must be JSON objects.', 422);
+            }
+            $leaseToken = $request->input('lease_token');
+            if (! is_string($leaseToken)) {
+                throw new McpQueueException('lease_token must be a string.', 422);
+            }
 
             return $this->queue->complete(
-                $this->context($request), $requestId, (string) $request->input('lease_token'),
-                is_array($request->input('response')) ? $request->input('response') : [],
-                is_array($request->input('executor')) ? $request->input('executor') : [],
+                $this->context($request), $requestId, $leaseToken,
+                $response,
+                $executor,
             );
         });
     }
@@ -61,9 +74,16 @@ final readonly class McpApiController
     {
         return $this->respond(function () use ($request, $requestId): array {
             $this->assertKeys($request, ['lease_token', 'error', 'retryable']);
+            if (! is_array($request->input('error')) || ! is_bool($request->input('retryable'))) {
+                throw new McpQueueException('error must be an object and retryable must be a boolean.', 422);
+            }
+            $leaseToken = $request->input('lease_token');
+            if (! is_string($leaseToken)) {
+                throw new McpQueueException('lease_token must be a string.', 422);
+            }
 
             return $this->queue->fail(
-                $this->context($request), $requestId, (string) $request->input('lease_token'),
+                $this->context($request), $requestId, $leaseToken,
                 (string) $request->input('error.code', 'executor_error'), (string) $request->input('error.message', 'Executor reported a failure.'),
                 (bool) $request->boolean('retryable'),
             );

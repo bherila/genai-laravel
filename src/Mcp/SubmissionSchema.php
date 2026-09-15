@@ -45,8 +45,8 @@ final class SubmissionSchema
             'required' => in_array($choice, ['any', 'tool'], true) ? ['tool_calls'] : ($choice === 'none' ? ['text'] : []),
             'additionalProperties' => false,
             'anyOf' => $choice === 'auto' ? [
-                ['properties' => ['text' => ['minLength' => 1]]],
-                ['properties' => ['tool_calls' => ['minItems' => 1]]],
+                ['required' => ['text'], 'properties' => ['text' => ['minLength' => 1]]],
+                ['required' => ['tool_calls'], 'properties' => ['tool_calls' => ['minItems' => 1]]],
             ] : null,
         ];
         if ($choice === 'none') {

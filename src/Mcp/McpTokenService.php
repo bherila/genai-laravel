@@ -15,10 +15,20 @@ final class McpTokenService
         if (! (bool) config('genai.mcp.personal_tokens.enabled', false)) {
             throw new \LogicException('The optional GenAI MCP personal-token adapter is disabled.');
         }
+        if (! $mailbox->enabled || trim($name) === '') {
+            throw new \InvalidArgumentException('Issue tokens only for an enabled mailbox and provide a name.');
+        }
+        $scopes = array_values(array_unique($scopes));
+        if ($scopes === [] || array_diff($scopes, ['genai:read', 'genai:work']) !== []) {
+            throw new \InvalidArgumentException('Token scopes must contain genai:read and/or genai:work.');
+        }
+        if ($expiresAt !== null && $expiresAt <= now()) {
+            throw new \InvalidArgumentException('Token expiration must be in the future.');
+        }
         $plain = 'genai_mcp_'.Str::random(64);
         McpToken::query()->create([
             'mailbox_id' => $mailbox->id, 'name' => Str::limit($name, 191, ''),
-            'token_hash' => hash('sha256', $plain), 'scopes' => array_values(array_unique($scopes)),
+            'token_hash' => hash('sha256', $plain), 'scopes' => $scopes,
             'expires_at' => $expiresAt,
         ]);
 
