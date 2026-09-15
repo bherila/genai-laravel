@@ -169,4 +169,31 @@ return [
         ],
     ],
 
+    /* Subscription-backed asynchronous execution. Routes are opt-in and auth fails closed. */
+    'mcp' => [
+        'enabled' => env('GENAI_MCP_ENABLED', false),
+        'personal_tokens' => ['enabled' => env('GENAI_MCP_PERSONAL_TOKENS', false)],
+        'lease' => ['seconds' => (int) env('GENAI_MCP_LEASE_SECONDS', 900), 'max_total_seconds' => (int) env('GENAI_MCP_MAX_LEASE_SECONDS', 3600)],
+        'limits' => [
+            'max_enqueue_json_bytes' => (int) env('GENAI_MCP_MAX_REQUEST_BYTES', 2097152),
+            'max_attachments' => (int) env('GENAI_MCP_MAX_ATTACHMENTS', 20),
+            'max_attachment_bytes' => (int) env('GENAI_MCP_MAX_ATTACHMENT_BYTES', 104857600),
+            'max_completion_bytes' => (int) env('GENAI_MCP_MAX_COMPLETION_BYTES', 1048576),
+            'max_completion_text_chars' => (int) env('GENAI_MCP_MAX_COMPLETION_TEXT_CHARS', 100000),
+            'max_tool_calls' => (int) env('GENAI_MCP_MAX_TOOL_CALLS', 16),
+            'max_json_nesting' => (int) env('GENAI_MCP_MAX_JSON_NESTING', 32),
+        ],
+        'attachments' => ['disk' => env('GENAI_MCP_ATTACHMENT_DISK', 'local')],
+        'retention' => ['terminal_days' => (int) env('GENAI_MCP_RETENTION_DAYS', 30)],
+        'rest' => ['enabled' => true, 'prefix' => env('GENAI_MCP_REST_PREFIX', 'genai/mcp/v1'), 'throttle' => env('GENAI_MCP_THROTTLE', '60,1')],
+        'server' => [
+            'enabled' => env('GENAI_MCP_SERVER_ENABLED', false),
+            'path' => env('GENAI_MCP_SERVER_PATH', 'genai/mcp'),
+            'allowed_origins' => array_values(array_filter(explode(',', (string) env('GENAI_MCP_ALLOWED_ORIGINS', '')))),
+            'allowed_hosts' => array_values(array_filter(explode(',', (string) env('GENAI_MCP_ALLOWED_HOSTS', '')))),
+            'max_body_bytes' => (int) env('GENAI_MCP_MAX_BODY_BYTES', 262144),
+            'session_ttl_seconds' => (int) env('GENAI_MCP_SESSION_TTL', 1800),
+        ],
+    ],
+
 ];

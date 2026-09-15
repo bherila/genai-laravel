@@ -3,7 +3,13 @@
 namespace Bherila\GenAiLaravel;
 
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
+use Bherila\GenAiLaravel\Contracts\QueuedGenAiClient;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
 use Bherila\GenAiLaravel\Instrumentation\SentryGenAiTracer;
+use Bherila\GenAiLaravel\Mcp\EnqueueOptions;
+use Bherila\GenAiLaravel\Mcp\GenAiRequestPayload;
+use Bherila\GenAiLaravel\Mcp\PendingGenAiRequest;
+use Bherila\GenAiLaravel\Mcp\StoredAttachment;
 
 /**
  * Fluent builder for provider-agnostic AI requests.
@@ -32,12 +38,12 @@ final class GenAiRequest
     /** @var list<array{role: string, content: list<ContentBlock>}>|null */
     private ?array $rawMessages = null;
 
-    private function __construct(private readonly GenAiClient $client) {}
+    private function __construct(private readonly GenAiClient|QueuedGenAiClient $client) {}
 
     /**
      * Create a new request bound to the given provider client.
      */
-    public static function with(GenAiClient $client): static
+    public static function with(GenAiClient|QueuedGenAiClient $client): static
     {
         return new self($client);
     }
@@ -68,10 +74,10 @@ final class GenAiRequest
     /**
      * Add a single inline file (base64-encoded) to the request.
      */
-    public function withFile(string $base64, string $mimeType): static
+    public function withFile(string $base64, string $mimeType, ?string $name = null): static
     {
         $clone = clone $this;
-        $clone->files[] = ContentBlock::document($base64, $mimeType);
+        $clone->files[] = ContentBlock::document($base64, $mimeType, $name);
 
         return $clone;
     }
@@ -100,13 +106,22 @@ final class GenAiRequest
         return $clone;
     }
 
+    /** Add a storage-backed attachment without base64 encoding it. */
+    public function withStoredAttachment(StoredAttachment $attachment): static
+    {
+        $clone = clone $this;
+        $clone->files[] = ContentBlock::storedAttachment($attachment);
+
+        return $clone;
+    }
+
     /**
      * Set the files for this request (replaces any previously added files).
      *
      * Accepts ContentBlock instances — so uploaded-file references and inline
      * bytes can be mixed — or the `['base64' => …, 'mimeType' => …]` shape.
      *
-     * @param  list<ContentBlock|array{base64: string, mimeType: string}>  $files
+     * @param  list<ContentBlock|array{base64: string, mimeType: string, name?: string}>  $files
      */
     public function withFiles(array $files): static
     {
@@ -114,7 +129,7 @@ final class GenAiRequest
         $clone->files = array_map(
             fn (ContentBlock|array $file) => $file instanceof ContentBlock
                 ? $file
-                : ContentBlock::document($file['base64'], $file['mimeType']),
+                : ContentBlock::document($file['base64'], $file['mimeType'], $file['name'] ?? null),
             $files,
         );
 
@@ -151,6 +166,9 @@ final class GenAiRequest
      */
     public function generate(): GenAiResponse
     {
+        if (! $this->client instanceof GenAiClient) {
+            throw new GenAiUnsupportedOperationException('Queued GenAI clients are asynchronous; call enqueue() and poll the returned request.');
+        }
         $messages = $this->rawMessages ?? $this->buildMessages();
         $raw = SentryGenAiTracer::trace(
             client: $this->client,
@@ -167,6 +185,19 @@ final class GenAiRequest
             raw: $raw,
             assistantMessage: $this->client->extractAssistantMessage($raw),
         );
+    }
+
+    public function enqueue(?EnqueueOptions $options = null): PendingGenAiRequest
+    {
+        if (! $this->client instanceof QueuedGenAiClient) {
+            throw new GenAiUnsupportedOperationException('Synchronous GenAI clients do not support enqueue().');
+        }
+
+        return $this->client->enqueue(new GenAiRequestPayload(
+            system: $this->system,
+            messages: $this->rawMessages ?? $this->buildMessages(),
+            toolConfig: $this->toolConfig,
+        ), $options);
     }
 
     /** @return list<array{role: string, content: list<ContentBlock>}> */

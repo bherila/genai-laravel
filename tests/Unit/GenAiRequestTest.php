@@ -4,6 +4,7 @@ namespace Bherila\GenAiLaravel\Tests\Unit;
 
 use Bherila\GenAiLaravel\Clients\AnthropicClient;
 use Bherila\GenAiLaravel\ContentBlock;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
 use Bherila\GenAiLaravel\GenAiRequest;
 use Bherila\GenAiLaravel\GenAiResponse;
 use Bherila\GenAiLaravel\Schema;
@@ -53,6 +54,12 @@ class GenAiRequestTest extends TestCase
         $this->assertSame('Hello world', $response->text);
         $this->assertSame([], $response->toolCalls);
         $this->assertFalse($response->hasToolCalls());
+    }
+
+    public function test_synchronous_client_rejects_enqueue(): void
+    {
+        $this->expectException(GenAiUnsupportedOperationException::class);
+        GenAiRequest::with($this->makeAnthropicClient())->prompt('Later')->enqueue();
     }
 
     public function test_generate_sends_system_and_prompt(): void
