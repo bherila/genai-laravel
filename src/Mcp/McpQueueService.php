@@ -258,7 +258,11 @@ final readonly class McpQueueService
             $this->assertLiveLease($request, $context, $leaseToken);
             $this->schemas->validate($response, $request->payload);
             $receiptId = (string) Str::uuid();
-            $result = ['text' => $response['text'], 'tool_calls' => $response['tool_calls'], 'executor' => $this->sanitizeExecutor($executor)];
+            $result = ['text' => $response['text'], 'tool_calls' => $response['tool_calls']];
+            $executor = $this->sanitizeExecutor($executor);
+            if ($executor !== []) {
+                $result['executor'] = $executor;
+            }
             $request->forceFill([
                 'status' => McpRequestStatus::Completed, 'result' => $result, 'completed_at' => now(),
                 'completion_hash' => $hash, 'completion_lease_hash' => hash('sha256', $leaseToken),

@@ -107,7 +107,7 @@ final class GenAiMcpToolCatalog
                     'input' => ['type' => 'object'],
                 ], ['name', 'input'])],
                 'executor' => ['type' => 'object', 'additionalProperties' => ['type' => 'string']],
-            ], ['text', 'tool_calls', 'executor']),
+            ], ['text', 'tool_calls']),
         ], ['request_id', 'status', 'receipt_id', 'result']);
     }
 
@@ -118,11 +118,16 @@ final class GenAiMcpToolCatalog
      */
     private function object(array $properties, array $required = [], bool $allowAdditional = false): array
     {
-        return array_filter([
+        $schema = array_filter([
             'type' => 'object',
             'properties' => $properties,
             'required' => $required,
             'additionalProperties' => $allowAdditional,
         ], static fn (mixed $value, string $key): bool => $key !== 'required' || $value !== [], ARRAY_FILTER_USE_BOTH);
+        if ($properties === [] && $allowAdditional) {
+            unset($schema['properties']);
+        }
+
+        return $schema;
     }
 }

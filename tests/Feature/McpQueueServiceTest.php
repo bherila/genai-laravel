@@ -207,6 +207,44 @@ final class McpQueueServiceTest extends TestCase
         }
     }
 
+    public function test_mcp_completion_preserves_an_empty_json_object_tool_input(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('ping', 'No input', Schema::object([]))], ToolChoice::any()))
+            ->prompt('Ping')->enqueue();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $headers = ['Accept' => 'application/json, text/event-stream', 'Authorization' => 'Bearer test-token'];
+        $initialize = $this->postJson('/genai/mcp', [
+            'jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize',
+            'params' => ['protocolVersion' => '2025-03-26', 'capabilities' => [], 'clientInfo' => ['name' => 'test', 'version' => '1']],
+        ], $headers)->assertOk();
+        $headers['Mcp-Session-Id'] = $initialize->headers->get('Mcp-Session-Id');
+        $headers['Mcp-Protocol-Version'] = '2025-03-26';
+
+        $this->postJson('/genai/mcp', [
+            'jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/call',
+            'params' => ['name' => 'complete_genai_request', 'arguments' => [
+                'request_id' => $pending->id,
+                'lease_token' => $claim['request']['lease_token'],
+                'response' => ['tool_calls' => [['name' => 'ping', 'input' => new \stdClass]]],
+            ]],
+        ], $headers)->assertOk()->assertJsonPath('result.structuredContent.status', 'completed');
+        $this->assertSame(McpRequestStatus::Completed, $pending->status());
+    }
+
+    public function test_rest_completion_preserves_an_empty_json_object_tool_input(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('ping', 'No input', Schema::object([]))], ToolChoice::any()))
+            ->prompt('Ping')->enqueue();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+
+        $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $claim['request']['lease_token'],
+            'response' => ['tool_calls' => [['name' => 'ping', 'input' => new \stdClass]]],
+        ])->assertOk()->assertJsonPath('status', 'completed');
+    }
+
     public function test_inline_attachment_is_stored_and_streamed_over_signed_authenticated_rest(): void
     {
         $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))

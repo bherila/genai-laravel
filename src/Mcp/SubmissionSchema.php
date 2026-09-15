@@ -14,11 +14,11 @@ final class SubmissionSchema
     public function forPayload(array $payload): array
     {
         $tools = $payload['tools'] ?? [];
-        $branches = array_map(static fn (array $tool): array => [
+        $branches = array_map(fn (array $tool): array => [
             'type' => 'object',
             'properties' => [
                 'name' => ['const' => $tool['name']],
-                'input' => $tool['input_schema'],
+                'input' => $this->wireSchema($tool['input_schema']),
             ],
             'required' => ['name', 'input'],
             'additionalProperties' => false,
@@ -85,18 +85,51 @@ final class SubmissionSchema
     /** @param array<string, mixed> $schema */
     public function assertPortable(array $schema): void
     {
-        array_walk_recursive($schema, static function (mixed $value, string $key): void {
-            if ($key === '$ref') {
-                throw new McpQueueException('JSON Schema $ref is not supported for queued portable requests; inline the referenced schema.', 422);
-            }
-        });
+        $this->assertNoReferences($schema);
         json_encode($schema, JSON_THROW_ON_ERROR);
+    }
+
+    private function assertNoReferences(mixed $schema): void
+    {
+        if (is_object($schema)) {
+            $schema = get_object_vars($schema);
+        }
+        if (! is_array($schema)) {
+            return;
+        }
+        foreach ($schema as $key => $value) {
+            if (in_array($key, ['$ref', '$dynamicRef', '$recursiveRef'], true)) {
+                throw new McpQueueException('JSON Schema references are not supported for queued portable requests; inline the referenced schema.', 422);
+            }
+            $this->assertNoReferences($value);
+        }
+    }
+
+    private function wireSchema(mixed $schema): mixed
+    {
+        if (is_object($schema)) {
+            $schema = get_object_vars($schema);
+        }
+        if (! is_array($schema)) {
+            return $schema;
+        }
+        foreach ($schema as $key => $value) {
+            $schema[$key] = $this->wireSchema($value);
+        }
+        if (($schema['type'] ?? null) === 'object' && ($schema['properties'] ?? null) === []) {
+            $schema['properties'] = new \stdClass;
+        }
+
+        return $schema;
     }
 
     private function assertDepth(mixed $value, int $remaining): void
     {
         if ($remaining < 0) {
             throw new McpQueueException('JSON nesting exceeds the configured limit.', 413);
+        }
+        if (is_object($value)) {
+            $value = get_object_vars($value);
         }
         if (! is_array($value)) {
             return;

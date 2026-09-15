@@ -5,6 +5,7 @@ namespace Bherila\GenAiLaravel\Mcp\Http;
 use Bherila\GenAiLaravel\Mcp\Exceptions\McpQueueException;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
+use Bherila\McpLaravelBridge\Json;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -52,9 +53,10 @@ final readonly class McpApiController
     {
         return $this->respond(function () use ($request, $requestId): array {
             $this->assertKeys($request, ['lease_token', 'response', 'executor']);
-            $response = $request->input('response');
-            $executor = $request->input('executor', []);
-            if (! is_array($response) || ! is_array($executor)) {
+            $wire = Json::decodeObject($request->getContent());
+            $response = $this->objectValue($wire['response'] ?? null);
+            $executor = $this->objectValue($wire['executor'] ?? new \stdClass);
+            if ($response === null || $executor === null) {
                 throw new McpQueueException('response and executor must be JSON objects.', 422);
             }
             $leaseToken = $request->input('lease_token');
@@ -112,5 +114,15 @@ final readonly class McpApiController
         } catch (McpQueueException $e) {
             return response()->json(['message' => $e->getMessage(), 'details' => $e->details], $e->httpStatus);
         }
+    }
+
+    /** @return array<string, mixed>|null */
+    private function objectValue(mixed $value): ?array
+    {
+        if (is_object($value)) {
+            return get_object_vars($value);
+        }
+
+        return is_array($value) && ! array_is_list($value) ? $value : null;
     }
 }

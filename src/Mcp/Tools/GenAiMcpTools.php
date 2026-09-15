@@ -5,9 +5,11 @@ namespace Bherila\GenAiLaravel\Mcp\Tools;
 use Bherila\GenAiLaravel\Mcp\Exceptions\McpQueueException;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
+use Bherila\McpLaravelBridge\Mcp\RequestArguments;
 use Illuminate\Http\Request;
 use Mcp\Capability\Attribute\Schema;
 use Mcp\Exception\ToolCallException;
+use Mcp\Server\RequestContext;
 
 final readonly class GenAiMcpTools
 {
@@ -44,8 +46,12 @@ final readonly class GenAiMcpTools
         #[Schema(format: 'uuid')] string $request_id,
         #[Schema(minLength: 32, maxLength: 255)] string $lease_token,
         #[Schema(type: 'object')] array $response,
+        RequestContext $context,
         #[Schema(type: 'object')] array $executor = [],
     ): array {
+        $response = $this->originalObject($context, 'response', $response);
+        $executor = $this->originalObject($context, 'executor', $executor);
+
         return $this->call(fn (): array => $this->queue->complete($this->context(), $request_id, $lease_token, $response, $executor));
     }
 
@@ -80,5 +86,18 @@ final readonly class GenAiMcpTools
         } catch (McpQueueException $exception) {
             throw new ToolCallException($exception->getMessage(), previous: $exception);
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $fallback
+     * @return array<string, mixed>
+     */
+    private function originalObject(RequestContext $context, string $name, array $fallback): array
+    {
+        /** @var Request $request */
+        $request = request();
+        $value = (new RequestArguments($request))->value($context, $name, $fallback);
+
+        return is_object($value) ? get_object_vars($value) : (is_array($value) ? $value : $fallback);
     }
 }
