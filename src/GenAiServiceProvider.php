@@ -36,11 +36,17 @@ class GenAiServiceProvider extends ServiceProvider
         $this->app->bind('genai.bedrock', fn () => GenAiClientFactory::make('bedrock'));
         $this->app->bind('genai.anthropic', fn () => GenAiClientFactory::make('anthropic'));
 
-        $this->app->bind(MailboxAccessResolver::class, fn () => config('genai.mcp.personal_tokens.enabled', false)
-            ? new PersonalTokenMailboxAccessResolver
-            : new DenyAllMailboxAccessResolver);
-        $this->app->bind(AttachmentResolver::class, StorageAttachmentResolver::class);
-        $this->app->bind(CompletionDelivery::class, RejectingCompletionDelivery::class);
+        if (! $this->app->bound(MailboxAccessResolver::class)) {
+            $this->app->bind(MailboxAccessResolver::class, fn () => config('genai.mcp.personal_tokens.enabled', false)
+                ? new PersonalTokenMailboxAccessResolver
+                : new DenyAllMailboxAccessResolver);
+        }
+        if (! $this->app->bound(AttachmentResolver::class)) {
+            $this->app->bind(AttachmentResolver::class, StorageAttachmentResolver::class);
+        }
+        if (! $this->app->bound(CompletionDelivery::class)) {
+            $this->app->bind(CompletionDelivery::class, RejectingCompletionDelivery::class);
+        }
         if (! $this->app->bound(McpHttpPolicy::class)) {
             $this->app->singleton(McpHttpPolicy::class, fn () => new McpHttpPolicy(
                 allowedOrigins: fn (): array => array_values(config('genai.mcp.server.allowed_origins', [])),
