@@ -81,6 +81,7 @@ return new class extends Migration
             $table->foreignUuid('mailbox_id')->constrained('genai_mcp_mailboxes')->cascadeOnDelete();
             $table->string('principal_key');
             $table->string('idempotency_key');
+            $table->string('queue_filter')->nullable();
             $table->timestamp('expires_at');
             $table->timestamps();
             $table->unique(['principal_key', 'idempotency_key'], 'genai_mcp_claim_receipt_unique');

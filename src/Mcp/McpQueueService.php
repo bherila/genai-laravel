@@ -102,7 +102,16 @@ final readonly class McpQueueService
                 return $request->fresh(['attachments']);
             });
         } catch (\Throwable $exception) {
-            Storage::disk((string) config('genai.mcp.attachments.disk', 'local'))->deleteDirectory('genai-mcp/'.$requestId);
+            try {
+                $rolledBack = ! McpRequest::query()->whereKey($requestId)->exists();
+            } catch (\Throwable) {
+                // If database state cannot be established, preserving bytes is safer than
+                // deleting attachments that may already belong to a committed request.
+                $rolledBack = false;
+            }
+            if ($rolledBack) {
+                Storage::disk((string) config('genai.mcp.attachments.disk', 'local'))->deleteDirectory('genai-mcp/'.$requestId);
+            }
             throw $exception;
         }
     }
@@ -142,6 +151,9 @@ final readonly class McpQueueService
                 $receipt = McpClaimReceipt::query()->where('principal_key', $context->principalKey)
                     ->where('idempotency_key', $idempotencyKey)->lockForUpdate()->first();
                 if ($receipt !== null && $receipt->expires_at->isFuture()) {
+                    if ($receipt->queue_filter !== $queue) {
+                        throw new McpQueueException('Claim idempotency key was already used with a different queue filter.', 409);
+                    }
                     $request = McpRequest::query()->with(['attachments', 'mailbox'])->find($receipt->request_id);
                     if ($request?->status === McpRequestStatus::Leased && $request->lease_expires_at?->isFuture()
                         && $this->access->authorize($context, $request->mailbox, 'genai:work', $request)) {
@@ -177,6 +189,7 @@ final readonly class McpQueueService
                 $receipt = new McpClaimReceipt([
                     'id' => (string) Str::uuid(), 'request_id' => $request->id, 'mailbox_id' => $request->mailbox_id,
                     'principal_key' => $context->principalKey, 'idempotency_key' => $idempotencyKey,
+                    'queue_filter' => $queue,
                 ]);
             }
             $plain = $receipt === null ? $this->leaseTokens->random() : $this->leaseTokens->forReceipt($receipt);
@@ -481,7 +494,9 @@ final readonly class McpQueueService
                     $this->assertAttachmentSize(strlen($bytes));
                     $disk = (string) config('genai.mcp.attachments.disk', 'local');
                     $path = 'genai-mcp/'.$request->id.'/'.$id;
-                    Storage::disk($disk)->put($path, $bytes);
+                    if (! Storage::disk($disk)->put($path, $bytes)) {
+                        throw new McpQueueException('Attachment storage write failed.', 503);
+                    }
                     $attachment = new StoredAttachment((string) ($block['name'] ?? 'attachment-'.$id), (string) $block['mime_type'], strlen($bytes), hash('sha256', $bytes), $disk, $path, packageOwned: true);
                 } else {
                     /** @var StoredAttachment $attachment */
@@ -524,7 +539,7 @@ final readonly class McpQueueService
         $envelope = ['empty' => false, 'request' => [
             'id' => $request->id, 'queue' => $request->queue, 'attempt' => $request->attempt_count,
             'lease_token' => $plain, 'lease_expires_at' => $expires->toIso8601String(),
-            'input' => ['system' => $request->payload['system'], 'messages' => $request->payload['messages']],
+            'input' => ['system' => $request->payload['system'], 'messages' => $this->wireMessages($request->payload['messages'])],
             'attachments' => $request->attachments->map(fn (McpAttachment $attachment): array => [
                 'id' => $attachment->id, 'name' => $attachment->name, 'mime_type' => $attachment->mime_type,
                 'size' => $attachment->size, 'sha256' => $attachment->sha256,
@@ -546,6 +561,29 @@ final readonly class McpQueueService
     private function receipt(McpRequest $request): array
     {
         return ['request_id' => $request->id, 'status' => 'completed', 'receipt_id' => $request->completion_receipt_id, 'result' => $request->result];
+    }
+
+    /**
+     * Eloquent's array JSON cast cannot distinguish an empty JSON object from an
+     * empty array. Tool-call inputs are defined as objects, so restore that wire
+     * shape when a stored no-argument call is claimed.
+     *
+     * @param  list<array{role: string, content: list<array<string, mixed>>}>  $messages
+     * @return list<array{role: string, content: list<array<string, mixed>>}>
+     */
+    private function wireMessages(array $messages): array
+    {
+        foreach ($messages as &$message) {
+            foreach ($message['content'] as &$block) {
+                if (($block['type'] ?? null) === 'tool_call' && ($block['input'] ?? null) === []) {
+                    $block['input'] = new \stdClass;
+                }
+            }
+            unset($block);
+        }
+        unset($message);
+
+        return $messages;
     }
 
     /**

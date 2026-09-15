@@ -42,7 +42,12 @@ final readonly class GenAiRequestPayload
             ContentBlock::TYPE_TEXT => ['type' => 'text', 'text' => $block->text],
             ContentBlock::TYPE_DOCUMENT => ['type' => 'inline_attachment', 'base64' => $block->base64, 'mime_type' => $block->mimeType, 'name' => $block->name],
             ContentBlock::TYPE_STORED_ATTACHMENT => ['type' => 'stored_attachment', 'attachment' => $block->storedAttachment],
-            ContentBlock::TYPE_TOOL_CALL => ['type' => 'tool_call', 'id' => $block->toolCallId, 'name' => $block->toolName, 'input' => $block->toolInput],
+            ContentBlock::TYPE_TOOL_CALL => [
+                'type' => 'tool_call',
+                'id' => $block->toolCallId,
+                'name' => $block->toolName,
+                'input' => $block->toolInput === [] ? new \stdClass : $block->toolInput,
+            ],
             ContentBlock::TYPE_TOOL_RESULT => ['type' => 'tool_result', 'id' => $block->toolCallId, 'name' => $block->toolName, 'result' => $block->toolResult, 'is_error' => $block->isError],
             ContentBlock::TYPE_FILE_REFERENCE => throw new \InvalidArgumentException('Provider file references cannot be enqueued for a subscription client.'),
             ContentBlock::TYPE_PROVIDER_RAW => throw new \InvalidArgumentException('Provider-owned raw content cannot be enqueued.'),

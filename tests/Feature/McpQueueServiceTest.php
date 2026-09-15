@@ -2,6 +2,7 @@
 
 namespace Bherila\GenAiLaravel\Tests\Feature;
 
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\CompletionDelivery;
 use Bherila\GenAiLaravel\Contracts\MailboxAccessResolver;
 use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
@@ -10,6 +11,7 @@ use Bherila\GenAiLaravel\GenAiServiceProvider;
 use Bherila\GenAiLaravel\Mcp\Auth\PersonalTokenMailboxAccessResolver;
 use Bherila\GenAiLaravel\Mcp\EnqueueOptions;
 use Bherila\GenAiLaravel\Mcp\Enums\McpRequestStatus;
+use Bherila\GenAiLaravel\Mcp\Events\McpRequestQueued;
 use Bherila\GenAiLaravel\Mcp\Exceptions\McpQueueException;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\McpClientFactory;
@@ -23,8 +25,10 @@ use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
 use Bherila\McpLaravelBridge\Http\McpHttpSecurityMiddleware;
+use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
 use Orchestra\Testbench\TestCase;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -79,6 +83,7 @@ final class McpQueueServiceTest extends TestCase
         $claim = $service->claim($this->context, idempotencyKey: 'claim:1');
         $this->assertSame($pending->id, $claim['request']['id']);
         $this->assertSame('extract', $claim['request']['submission_schema']['properties']['tool_calls']['items']['oneOf'][0]['properties']['name']['const']);
+        $this->assertArrayNotHasKey('anyOf', $claim['request']['submission_schema']);
 
         $response = ['text' => '', 'tool_calls' => [['name' => 'extract', 'input' => ['amount' => 12.5]]]];
         $first = $service->complete($this->context, $pending->id, $claim['request']['lease_token'], $response, ['client' => 'test']);
@@ -106,6 +111,22 @@ final class McpQueueServiceTest extends TestCase
         $this->assertSame($first['request']['lease_token'], $second['request']['lease_token']);
         $this->assertSame(1, McpRequest::query()->find($pending->id)->attempt_count);
         $this->assertNotSame($first['request']['lease_token'], McpRequest::query()->find($pending->id)->lease_token_hash);
+    }
+
+    public function test_claim_idempotency_rejects_a_different_queue_filter(): void
+    {
+        $client = $this->app->make(McpClientFactory::class)->forMailbox($this->mailbox());
+        GenAiRequest::with($client)->prompt('Alpha')->enqueue(new EnqueueOptions(queue: 'alpha'));
+        GenAiRequest::with($client)->prompt('Beta')->enqueue(new EnqueueOptions(queue: 'beta'));
+        $service = $this->app->make(McpQueueService::class);
+        $service->claim($this->context, queue: 'alpha', idempotencyKey: 'scheduled-run');
+
+        try {
+            $service->claim($this->context, queue: 'beta', idempotencyKey: 'scheduled-run');
+            $this->fail('Expected claim idempotency to be bound to the original queue filter.');
+        } catch (McpQueueException $exception) {
+            $this->assertSame(409, $exception->httpStatus);
+        }
     }
 
     public function test_expired_lease_is_reclaimed_and_old_executor_cannot_complete(): void
@@ -174,6 +195,20 @@ final class McpQueueServiceTest extends TestCase
         $this->travel(11)->seconds();
 
         $this->assertNull($service->claim($this->context));
+        $this->assertSame(McpRequestStatus::Failed, $pending->status());
+        $this->assertDatabaseHas('genai_mcp_deliveries', ['request_id' => $pending->id, 'type' => 'failed']);
+    }
+
+    public function test_prune_finalizes_an_exhausted_expired_lease_without_another_claim(): void
+    {
+        config(['genai.mcp.lease.seconds' => 10]);
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Only once')->enqueue(new EnqueueOptions(maxAttempts: 1));
+        $this->app->make(McpQueueService::class)->claim($this->context);
+        $this->travel(11)->seconds();
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+
         $this->assertSame(McpRequestStatus::Failed, $pending->status());
         $this->assertDatabaseHas('genai_mcp_deliveries', ['request_id' => $pending->id, 'type' => 'failed']);
     }
@@ -255,6 +290,54 @@ final class McpQueueServiceTest extends TestCase
         $this->assertSame('large-ish bytes', $download->streamedContent());
         $this->assertStringContainsString('no-store', (string) $download->headers->get('Cache-Control'));
         $this->assertStringNotContainsString(base64_encode('large-ish bytes'), json_encode(McpRequest::query()->find($pending->id)->payload));
+    }
+
+    public function test_enqueue_rolls_back_when_attachment_storage_rejects_a_write(): void
+    {
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldReceive('put')->once()->andReturnFalse();
+        $disk->shouldReceive('deleteDirectory')->once()->andReturnTrue();
+        Storage::shouldReceive('disk')->with('local')->andReturn($disk);
+
+        try {
+            GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+                ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+            $this->fail('Expected the failed storage write to abort enqueue.');
+        } catch (McpQueueException $exception) {
+            $this->assertSame(503, $exception->httpStatus);
+        }
+        $this->assertDatabaseCount('genai_mcp_requests', 0);
+        $this->assertDatabaseCount('genai_mcp_attachments', 0);
+    }
+
+    public function test_post_commit_listener_failure_does_not_delete_committed_attachments(): void
+    {
+        Event::listen(McpRequestQueued::class, static function (): never {
+            throw new \RuntimeException('listener failed after commit');
+        });
+
+        try {
+            GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+                ->withFile(base64_encode('durable bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+            $this->fail('Expected the post-commit listener exception to reach the producer.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame('listener failed after commit', $exception->getMessage());
+        }
+
+        $request = McpRequest::query()->with('attachments')->firstOrFail();
+        $attachment = $request->attachments->firstOrFail();
+        Storage::disk((string) $attachment->disk)->assertExists((string) $attachment->path);
+    }
+
+    public function test_empty_historical_tool_input_is_emitted_as_a_json_object(): void
+    {
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->messages([['role' => 'assistant', 'content' => [ContentBlock::toolCall('call-1', 'ping', [])]]])
+            ->enqueue();
+
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $encoded = json_encode($claim['request']['input']['messages'][0]['content'][0], JSON_THROW_ON_ERROR);
+        $this->assertStringContainsString('"input":{}', $encoded);
     }
 
     public function test_retryable_failure_requeues_with_server_backoff(): void

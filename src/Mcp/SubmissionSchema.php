@@ -44,11 +44,13 @@ final class SubmissionSchema
             ],
             'required' => in_array($choice, ['any', 'tool'], true) ? ['tool_calls'] : ($choice === 'none' ? ['text'] : []),
             'additionalProperties' => false,
-            'anyOf' => $choice === 'auto' ? [
+        ];
+        if ($choice === 'auto') {
+            $schema['anyOf'] = [
                 ['required' => ['text'], 'properties' => ['text' => ['minLength' => 1]]],
                 ['required' => ['tool_calls'], 'properties' => ['tool_calls' => ['minItems' => 1]]],
-            ] : null,
-        ];
+            ];
+        }
         if ($choice === 'none') {
             $schema['properties']['text']['minLength'] = 1;
         }
@@ -69,9 +71,6 @@ final class SubmissionSchema
         $this->assertDepth($response, (int) config('genai.mcp.limits.max_json_nesting', 32));
 
         $schema = $this->forPayload($payload);
-        if ($schema['anyOf'] === null) {
-            unset($schema['anyOf']);
-        }
         $dataObject = json_decode($encoded, false, 512, JSON_THROW_ON_ERROR);
         $schemaObject = json_decode(json_encode($schema, JSON_THROW_ON_ERROR), false, 512, JSON_THROW_ON_ERROR);
         $result = (new Validator)->validate($dataObject, $schemaObject);

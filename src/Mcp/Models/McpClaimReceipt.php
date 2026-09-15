@@ -11,6 +11,7 @@ use Illuminate\Support\Carbon;
  * @property string $request_id
  * @property string $principal_key
  * @property string $idempotency_key
+ * @property string|null $queue_filter
  * @property Carbon $expires_at
  */
 final class McpClaimReceipt extends Model

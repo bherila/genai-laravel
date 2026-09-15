@@ -4,9 +4,12 @@ namespace Bherila\GenAiLaravel\Mcp\Commands;
 
 use Bherila\GenAiLaravel\Mcp\Enums\McpRequestStatus;
 use Bherila\GenAiLaravel\Mcp\Events\McpRequestExpired;
+use Bherila\GenAiLaravel\Mcp\Events\McpRequestFailed;
+use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
 use Bherila\GenAiLaravel\Mcp\Models\McpToken;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
 final class PruneMcpRequests extends Command
@@ -22,6 +25,33 @@ final class PruneMcpRequests extends Command
                 $request->forceFill(['status' => McpRequestStatus::Expired, 'lease_token_hash' => null, 'lease_expires_at' => null])->save();
                 event(new McpRequestExpired($request->id));
             });
+
+        do {
+            $finalized = DB::transaction(function (): int {
+                $requests = McpRequest::query()->where('status', McpRequestStatus::Leased->value)
+                    ->where('lease_expires_at', '<=', now())
+                    ->whereColumn('attempt_count', '>=', 'max_attempts')
+                    ->lockForUpdate()->limit(100)->get();
+                foreach ($requests as $request) {
+                    $error = ['code' => 'attempts_exhausted', 'message' => 'The final executor lease expired.'];
+                    $request->forceFill([
+                        'status' => McpRequestStatus::Failed,
+                        'failed_at' => now(),
+                        'error' => $error,
+                        'lease_token_hash' => null,
+                        'lease_expires_at' => null,
+                        'lease_principal' => null,
+                    ])->save();
+                    McpDelivery::query()->firstOrCreate(
+                        ['request_id' => $request->id, 'type' => 'failed'],
+                        ['payload' => ['error' => $error], 'available_at' => now()],
+                    );
+                    DB::afterCommit(fn () => event(new McpRequestFailed($request->id, true)));
+                }
+
+                return $requests->count();
+            });
+        } while ($finalized === 100);
 
         $before = now()->subDays((int) config('genai.mcp.retention.terminal_days', 30));
         McpRequest::query()->whereIn('status', [McpRequestStatus::Completed->value, McpRequestStatus::Failed->value, McpRequestStatus::Cancelled->value, McpRequestStatus::Expired->value])
