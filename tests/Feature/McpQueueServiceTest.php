@@ -373,6 +373,40 @@ final class McpQueueServiceTest extends TestCase
         $this->assertNotEmpty($response->headers->get('Mcp-Session-Id'));
     }
 
+    public function test_standalone_catalog_advertises_exact_lifecycle_annotations(): void
+    {
+        $this->mailbox();
+        $headers = ['Accept' => 'application/json, text/event-stream', 'Authorization' => 'Bearer test-token'];
+        $initialize = $this->postJson('/genai/mcp', [
+            'jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize',
+            'params' => ['protocolVersion' => '2025-03-26', 'capabilities' => [], 'clientInfo' => ['name' => 'test', 'version' => '1']],
+        ], $headers)->assertOk();
+        $headers['Mcp-Session-Id'] = $initialize->headers->get('Mcp-Session-Id');
+        $headers['Mcp-Protocol-Version'] = '2025-03-26';
+
+        $tools = $this->postJson('/genai/mcp', [
+            'jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/list', 'params' => new \stdClass,
+        ], $headers)->assertOk()->json('result.tools');
+
+        $this->assertSame([
+            'genai_queue_status' => [
+                'readOnlyHint' => true, 'destructiveHint' => false, 'idempotentHint' => true, 'openWorldHint' => false,
+            ],
+            'claim_genai_request' => [
+                'readOnlyHint' => false, 'destructiveHint' => false, 'idempotentHint' => false, 'openWorldHint' => false,
+            ],
+            'renew_genai_lease' => [
+                'readOnlyHint' => false, 'destructiveHint' => false, 'idempotentHint' => false, 'openWorldHint' => false,
+            ],
+            'complete_genai_request' => [
+                'readOnlyHint' => false, 'destructiveHint' => false, 'idempotentHint' => true, 'openWorldHint' => false,
+            ],
+            'fail_genai_request' => [
+                'readOnlyHint' => false, 'destructiveHint' => false, 'idempotentHint' => false, 'openWorldHint' => false,
+            ],
+        ], collect($tools)->mapWithKeys(static fn (array $tool): array => [$tool['name'] => $tool['annotations']])->all());
+    }
+
     public function test_mcp_and_rest_claims_return_the_same_canonical_envelope(): void
     {
         $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))->prompt('Same payload')->enqueue();
