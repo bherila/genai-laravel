@@ -213,6 +213,18 @@ final class McpQueueServiceTest extends TestCase
         $this->assertDatabaseHas('genai_mcp_deliveries', ['request_id' => $pending->id, 'type' => 'failed']);
     }
 
+    public function test_prune_transactionally_expires_request_level_deadlines(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Deadline')->enqueue(new EnqueueOptions(expiresAt: now()->addSecond()));
+        $this->travel(2)->seconds();
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+
+        $this->assertSame(McpRequestStatus::Expired, $pending->status());
+        $this->assertNull(McpRequest::query()->findOrFail($pending->id)->lease_principal);
+    }
+
     public function test_invalid_tool_input_is_rejected_without_consuming_lease(): void
     {
         $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))

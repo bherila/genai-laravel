@@ -20,11 +20,28 @@ final class PruneMcpRequests extends Command
 
     public function handle(): int
     {
-        McpRequest::query()->whereIn('status', [McpRequestStatus::Pending->value, McpRequestStatus::Leased->value])
-            ->whereNotNull('expires_at')->where('expires_at', '<=', now())->eachById(function (McpRequest $request): void {
-                $request->forceFill(['status' => McpRequestStatus::Expired, 'lease_token_hash' => null, 'lease_expires_at' => null])->save();
-                event(new McpRequestExpired($request->id));
+        do {
+            $expired = DB::transaction(function (): int {
+                $requests = McpRequest::query()
+                    ->whereIn('status', [McpRequestStatus::Pending->value, McpRequestStatus::Leased->value])
+                    ->whereNotNull('expires_at')->where('expires_at', '<=', now())
+                    ->lockForUpdate()->limit(100)->get();
+                foreach ($requests as $request) {
+                    if (! in_array($request->status, [McpRequestStatus::Pending, McpRequestStatus::Leased], true)) {
+                        continue;
+                    }
+                    $request->forceFill([
+                        'status' => McpRequestStatus::Expired,
+                        'lease_token_hash' => null,
+                        'lease_expires_at' => null,
+                        'lease_principal' => null,
+                    ])->save();
+                    DB::afterCommit(fn () => event(new McpRequestExpired($request->id)));
+                }
+
+                return $requests->count();
             });
+        } while ($expired === 100);
 
         do {
             $finalized = DB::transaction(function (): int {
