@@ -53,6 +53,58 @@ jobs:
       - name: Static analysis (PHPStan)
         run: vendor/bin/phpstan analyse --no-progress --memory-limit=512M
 
+  mariadb:
+    # The suite runs on SQLite, which has no identifier-length limit and transactional DDL. Run the
+    # migration tests against real MariaDB so MySQL-family failures (for example a generated index
+    # name over 64 characters) fail here instead of in a consumer's production deploy.
+    name: Migrations / MariaDB ${{ matrix.mariadb }}
+    runs-on: ubuntu-24.04-arm
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 10.6 matches the oldest production consumer; 11.4 is the current LTS.
+        mariadb: ["10.6", "11.4"]
+
+    services:
+      mariadb:
+        image: mariadb:${{ matrix.mariadb }}
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "yes"
+          MARIADB_DATABASE: genai_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized || mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+          extensions: mbstring, json, pdo_mysql
+          coverage: none
+
+      - name: Install dependencies
+        run: |
+          composer require "laravel/framework:13.*" "orchestra/testbench:^11" --no-interaction --no-update
+          composer update --prefer-stable --prefer-dist --no-interaction
+
+      - name: Run migration tests against MariaDB
+        env:
+          GENAI_TEST_DB_DRIVER: mariadb
+          GENAI_TEST_DB_HOST: 127.0.0.1
+          GENAI_TEST_DB_PORT: "3306"
+          GENAI_TEST_DB_DATABASE: genai_test
+          GENAI_TEST_DB_USERNAME: root
+          GENAI_TEST_DB_PASSWORD: ""
+        run: vendor/bin/phpunit --configuration phpunit.xml --filter McpMigrationTest
+
   static:
     name: Lint and maintenance checks
     runs-on: ubuntu-24.04-arm
