@@ -2,7 +2,7 @@
     "name": "bherila/genai-laravel",
     "description": "Provider-agnostic GenAI client for Laravel: Gemini, AWS Bedrock, and more",
     "type": "library",
-    "keywords": ["laravel", "gemini", "bedrock", "ai", "genai", "llm"],
+    "keywords": ["laravel", "gemini", "bedrock", "anthropic", "mcp", "ai", "genai", "llm"],
     "license": "MIT",
     "authors": [
         {
@@ -11,14 +11,20 @@
         }
     ],
     "require": {
+        "bherila/mcp-laravel-bridge": "^0.2.0",
         "php": "^8.4",
         "illuminate/contracts": "^13",
+        "illuminate/database": "^13",
+        "illuminate/filesystem": "^13",
         "illuminate/support": "^13",
-        "illuminate/http": "^13"
+        "illuminate/http": "^13",
+        "illuminate/routing": "^13",
+        "opis/json-schema": "^2.6"
     },
     "require-dev": {
         "dompdf/dompdf": "^3",
         "laravel/pint": "^1",
+        "larastan/larastan": "^3",
         "orchestra/testbench": "^11",
         "phpoffice/phpspreadsheet": "^4|^5",
         "phpoffice/phpword": "^1",

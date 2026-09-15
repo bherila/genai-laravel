@@ -2,6 +2,8 @@
 
 namespace Bherila\GenAiLaravel;
 
+use Bherila\GenAiLaravel\Mcp\StoredAttachment;
+
 /**
  * Provider-agnostic content block for message payloads.
  *
@@ -33,6 +35,8 @@ final class ContentBlock
     public const TYPE_DOCUMENT = 'document';
 
     public const TYPE_FILE_REFERENCE = 'file_reference';
+
+    public const TYPE_STORED_ATTACHMENT = 'stored_attachment';
 
     public const TYPE_TOOL_CALL = 'tool_call';
 
@@ -67,6 +71,8 @@ final class ContentBlock
         public readonly string|array|null $toolResult = null,
         public readonly bool $isError = false,
         public readonly array $providerMetadata = [],
+        public readonly ?StoredAttachment $storedAttachment = null,
+        public readonly ?string $name = null,
     ) {}
 
     /**
@@ -91,9 +97,9 @@ final class ContentBlock
      * @param  string  $base64  Base64-encoded file content.
      * @param  string  $mimeType  MIME type (e.g. "application/pdf").
      */
-    public static function document(string $base64, string $mimeType): self
+    public static function document(string $base64, string $mimeType, ?string $name = null): self
     {
-        return new self(type: self::TYPE_DOCUMENT, base64: $base64, mimeType: $mimeType);
+        return new self(type: self::TYPE_DOCUMENT, base64: $base64, mimeType: $mimeType, name: $name);
     }
 
     /**
@@ -110,6 +116,12 @@ final class ContentBlock
     public static function fileReference(string $fileRef, string $mimeType): self
     {
         return new self(type: self::TYPE_FILE_REFERENCE, mimeType: $mimeType, fileRef: $fileRef);
+    }
+
+    /** Reference application or package storage without loading bytes into memory. */
+    public static function storedAttachment(StoredAttachment $attachment): self
+    {
+        return new self(type: self::TYPE_STORED_ATTACHMENT, storedAttachment: $attachment);
     }
 
     /**
