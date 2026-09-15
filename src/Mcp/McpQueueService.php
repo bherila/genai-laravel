@@ -64,9 +64,9 @@ final readonly class McpQueueService
             'max_attempts' => $options->maxAttempts, 'metadata' => $options->metadata,
         ]));
 
-        $createdRequestId = null;
+        $requestId = (string) Str::uuid();
         try {
-            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $enqueueHash, &$createdRequestId): McpRequest {
+            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $enqueueHash, $requestId): McpRequest {
                 $mailbox = McpMailbox::query()->lockForUpdate()->find($mailbox->id);
                 if ($mailbox === null) {
                     throw new McpQueueException('Mailbox not found.', 404);
@@ -87,7 +87,7 @@ final readonly class McpQueueService
                 }
 
                 $request = McpRequest::query()->create([
-                    'mailbox_id' => $mailbox->id, 'queue' => $options->queue,
+                    'id' => $requestId, 'mailbox_id' => $mailbox->id, 'queue' => $options->queue,
                     'status' => McpRequestStatus::Pending, 'priority' => $options->priority,
                     'payload' => [], 'metadata' => $options->metadata,
                     'idempotency_key' => $options->idempotencyKey,
@@ -95,7 +95,6 @@ final readonly class McpQueueService
                     'available_at' => $options->availableAt ?? now(), 'expires_at' => $options->expiresAt,
                     'max_attempts' => $options->maxAttempts,
                 ]);
-                $createdRequestId = $request->id;
                 $request->payload = $this->materializeAttachments($request, $raw);
                 $request->save();
                 $this->db->connection()->afterCommit(fn () => event(new McpRequestQueued($request->id)));
@@ -103,9 +102,7 @@ final readonly class McpQueueService
                 return $request->fresh(['attachments']);
             });
         } catch (\Throwable $exception) {
-            if ($createdRequestId !== null) {
-                Storage::disk((string) config('genai.mcp.attachments.disk', 'local'))->deleteDirectory('genai-mcp/'.$createdRequestId);
-            }
+            Storage::disk((string) config('genai.mcp.attachments.disk', 'local'))->deleteDirectory('genai-mcp/'.$requestId);
             throw $exception;
         }
     }
