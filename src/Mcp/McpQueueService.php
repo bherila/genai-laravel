@@ -139,8 +139,8 @@ final readonly class McpQueueService
             $this->expireRequests($context, $queue);
             $this->failExhaustedLeases($context, $queue);
             if ($idempotencyKey !== null) {
-                $receipt = McpClaimReceipt::query()->whereIn('mailbox_id', $context->mailboxIds)
-                    ->where('principal_key', $context->principalKey)->where('idempotency_key', $idempotencyKey)->lockForUpdate()->first();
+                $receipt = McpClaimReceipt::query()->where('principal_key', $context->principalKey)
+                    ->where('idempotency_key', $idempotencyKey)->lockForUpdate()->first();
                 if ($receipt !== null && $receipt->expires_at->isFuture()) {
                     $request = McpRequest::query()->with(['attachments', 'mailbox'])->find($receipt->request_id);
                     if ($request?->status === McpRequestStatus::Leased && $request->lease_expires_at?->isFuture()

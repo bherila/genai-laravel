@@ -83,7 +83,7 @@ return new class extends Migration
             $table->string('idempotency_key');
             $table->timestamp('expires_at');
             $table->timestamps();
-            $table->unique(['mailbox_id', 'principal_key', 'idempotency_key'], 'genai_mcp_claim_receipt_unique');
+            $table->unique(['principal_key', 'idempotency_key'], 'genai_mcp_claim_receipt_unique');
         });
 
         Schema::create('genai_mcp_deliveries', function (Blueprint $table): void {
