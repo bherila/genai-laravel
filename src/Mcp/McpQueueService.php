@@ -64,9 +64,9 @@ final readonly class McpQueueService
             'max_attempts' => $options->maxAttempts, 'metadata' => $options->metadata,
         ]));
 
-        $ownedPaths = [];
+        $createdRequestId = null;
         try {
-            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $enqueueHash, &$ownedPaths): McpRequest {
+            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $enqueueHash, &$createdRequestId): McpRequest {
                 $mailbox = McpMailbox::query()->lockForUpdate()->find($mailbox->id);
                 if ($mailbox === null) {
                     throw new McpQueueException('Mailbox not found.', 404);
@@ -95,15 +95,16 @@ final readonly class McpQueueService
                     'available_at' => $options->availableAt ?? now(), 'expires_at' => $options->expiresAt,
                     'max_attempts' => $options->maxAttempts,
                 ]);
-                $request->payload = $this->materializeAttachments($request, $raw, $ownedPaths);
+                $createdRequestId = $request->id;
+                $request->payload = $this->materializeAttachments($request, $raw);
                 $request->save();
                 $this->db->connection()->afterCommit(fn () => event(new McpRequestQueued($request->id)));
 
                 return $request->fresh(['attachments']);
             });
         } catch (\Throwable $exception) {
-            foreach ($ownedPaths as [$disk, $path]) {
-                Storage::disk($disk)->delete($path);
+            if ($createdRequestId !== null) {
+                Storage::disk((string) config('genai.mcp.attachments.disk', 'local'))->deleteDirectory('genai-mcp/'.$createdRequestId);
             }
             throw $exception;
         }
@@ -457,10 +458,9 @@ final readonly class McpQueueService
 
     /**
      * @param  array<string, mixed>  $payload
-     * @param  list<array{string, string}>  $ownedPaths
      * @return array<string, mixed>
      */
-    private function materializeAttachments(McpRequest $request, array $payload, array &$ownedPaths): array
+    private function materializeAttachments(McpRequest $request, array $payload): array
     {
         $count = 0;
         foreach ($payload['messages'] as &$message) {
@@ -481,7 +481,6 @@ final readonly class McpQueueService
                     $disk = (string) config('genai.mcp.attachments.disk', 'local');
                     $path = 'genai-mcp/'.$request->id.'/'.$id;
                     Storage::disk($disk)->put($path, $bytes);
-                    $ownedPaths[] = [$disk, $path];
                     $attachment = new StoredAttachment((string) ($block['name'] ?? 'attachment-'.$id), (string) $block['mime_type'], strlen($bytes), hash('sha256', $bytes), $disk, $path, packageOwned: true);
                 } else {
                     /** @var StoredAttachment $attachment */
