@@ -7,6 +7,7 @@ use Bherila\GenAiLaravel\Clients\BedrockClient;
 use Bherila\GenAiLaravel\Clients\GeminiClient;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Orchestra\Testbench\TestCase;
 
@@ -77,7 +78,7 @@ class FileTypeValidationTest extends TestCase
         (new AnthropicClient(apiKey: 'test', model: 'claude-sonnet-4-6'))
             ->converseWithInlineFile($pngB64, 'image/png', 'Describe this.');
 
-        Http::assertSent(function (\Illuminate\Http\Client\Request $req) use ($pngB64) {
+        Http::assertSent(function (Request $req) use ($pngB64) {
             $content = $req->data()['messages'][0]['content'] ?? [];
             foreach ($content as $block) {
                 if (($block['type'] ?? '') === 'image'
@@ -164,7 +165,7 @@ class FileTypeValidationTest extends TestCase
         (new BedrockClient(apiKey: 'test', modelId: 'model'))
             ->converseWithInlineFile(base64_encode('png'), 'image/png', 'Describe.');
 
-        Http::assertSent(function (\Illuminate\Http\Client\Request $req) {
+        Http::assertSent(function (Request $req) {
             $content = $req->data()['messages'][0]['content'] ?? [];
             foreach ($content as $block) {
                 if (($block['image']['format'] ?? '') === 'png') {
@@ -186,7 +187,6 @@ class FileTypeValidationTest extends TestCase
 
         $client->converseWithInlineFile(base64_encode('junk'), 'application/octet-stream', 'x');
     }
-
 
     // ── Gemini ───────────────────────────────────────────────────────────────
 

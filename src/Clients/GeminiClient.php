@@ -5,8 +5,12 @@ namespace Bherila\GenAiLaravel\Clients;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
+use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
+use Bherila\GenAiLaravel\FileLimits;
 use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
@@ -28,7 +32,7 @@ use Illuminate\Support\Facades\Log;
  *
  * Config keys (all under genai.providers.gemini):
  *   api_key  — required; may be per-user or site-wide
- *   model    — e.g. "gemini-2.0-flash" (default: "gemini-2.0-flash")
+ *   model    — e.g. "gemini-3.6-flash" (default: "gemini-3.6-flash")
  *   timeout  — HTTP timeout in seconds (default: 240)
  *   response_mime_type — optional generation response MIME type; null disables MIME forcing
  */
@@ -48,18 +52,27 @@ class GeminiClient implements GenAiClient
 
     private RetryStrategy $retry;
 
+    /**
+     * Ceilings for the Office-document conversions this client runs on the
+     * caller's behalf. Best-effort resource guards, not a sandbox — see
+     * ConversionLimits before feeding it documents from untrusted users.
+     */
+    private ConversionLimits $conversionLimits;
+
     public function __construct(
         string $apiKey,
-        string $model = 'gemini-2.0-flash',
+        string $model = 'gemini-3.6-flash',
         int $timeout = 240,
         ?RetryStrategy $retry = null,
         ?string $responseMimeType = 'application/json',
+        ?ConversionLimits $conversionLimits = null,
     ) {
         $this->apiKey = $apiKey;
-        $this->model = $model;
+        $this->model = self::normaliseModelId($model);
         $this->timeout = $timeout;
         $this->responseMimeType = $responseMimeType !== '' ? $responseMimeType : null;
         $this->retry = $retry ?? RetryStrategy::fromConfig();
+        $this->conversionLimits = $conversionLimits ?? ConversionLimits::fromConfig();
     }
 
     public function provider(): string
@@ -73,21 +86,73 @@ class GeminiClient implements GenAiClient
     }
 
     /**
-     * Gemini File API limit: 2 GB per file.
-     * In practice, keep documents under 20 MB for reliable extraction.
+     * Strip the `models/` resource-name prefix so an ID taken straight out of
+     * listModels() (or Google's docs, which quote both forms) is call-ready.
+     *
+     * Tuned models keep their own `tunedModels/` prefix — it is part of the path
+     * the API expects — so only the `models/` collection prefix is removed.
      */
-    public static function maxFileBytes(): int
+    private static function normaliseModelId(string $model): string
     {
-        return 20 * 1024 * 1024; // 20 MB practical limit
+        return str_starts_with($model, 'models/') ? substr($model, strlen('models/')) : $model;
+    }
+
+    /**
+     * Inline content shares the request budget with everything else in the turn,
+     * and base64 inflates bytes by a third, so the decoded ceiling is 15 MB
+     * regardless of MIME type. This is this package's conservative policy, not a
+     * quoted Google ceiling — theirs has moved, and anything approaching it
+     * belongs in the File API anyway.
+     * https://ai.google.dev/gemini-api/docs/document-processing
+     */
+    public static function maxInlineFileBytes(string $mimeType): int
+    {
+        return intdiv(20 * 1024 * 1024 * 3, 4); // 15 MB decoded
+    }
+
+    /** Gemini File API limit: 2 GB per file. */
+    public static function maxUploadedFileBytes(): ?int
+    {
+        return 2 * 1024 * 1024 * 1024;
+    }
+
+    /** Gemini documents no per-message block-count cap. */
+    public static function maxInlineBlocksPerMessage(string $mimeType): ?int
+    {
+        return null;
+    }
+
+    /**
+     * A conservative package policy rather than a quoted provider ceiling:
+     * Google's documented inline limit has moved more than once, so this caps
+     * what we will send instead of asserting what they will accept. Anything
+     * near it belongs in the File API regardless.
+     */
+    public static function maxRequestBytes(): ?int
+    {
+        return 20 * 1024 * 1024;
+    }
+
+    public static function supportsFileApi(): bool
+    {
+        return true;
     }
 
     /**
      * Upload a file to the Gemini File API.
      *
      * @param  resource|string  $fileContent
+     *
+     * @throws GenAiFileTooLargeException When the file exceeds the 2 GB File API limit.
+     * @throws GenAiUploadException When Gemini rejects or fails the upload.
      */
-    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
+    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): string
     {
+        $size = FileLimits::contentLength($fileContent);
+        if ($size !== null) {
+            FileLimits::assertWithin($size, (int) self::maxUploadedFileBytes(), 'Gemini File API', 'the uploaded file');
+        }
+
         $name = $displayName !== '' ? $displayName : 'genai-upload-'.time();
 
         $response = Http::withHeaders(['x-goog-api-key' => $this->apiKey])
@@ -103,14 +168,23 @@ class GeminiClient implements GenAiClient
                 'body' => $response->body(),
             ]);
 
-            if ($response->status() === 400) {
-                throw new GenAiFatalException('File rejected by Gemini: '.$response->body());
-            }
-
-            return null;
+            throw new GenAiUploadException(
+                'Gemini File API upload failed with HTTP '.$response->status().': '.$response->body(),
+                status: $response->status(),
+                body: $response->body(),
+            );
         }
 
-        return $response->json('file.uri') ?? $response->json('file.name');
+        $ref = $response->json('file.uri') ?? $response->json('file.name');
+        if (! is_string($ref) || $ref === '') {
+            throw new GenAiUploadException(
+                'Gemini File API upload succeeded but returned no file URI or name.',
+                status: $response->status(),
+                body: $response->body(),
+            );
+        }
+
+        return $ref;
     }
 
     /**
@@ -164,7 +238,8 @@ class GeminiClient implements GenAiClient
             && WordDocumentToPdf::isAvailable()
         ) {
             // Word doc → PDF: preserves formatting for Gemini's vision pipeline.
-            $pdfB64 = WordDocumentToPdf::convert($fileBytes, $mimeType);
+            $pdfB64 = WordDocumentToPdf::convert($fileBytes, $mimeType, $this->conversionLimits);
+            $this->assertInlineSizeWithinLimit($pdfB64, 'application/pdf');
             $parts = [
                 ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]],
                 ['text' => $prompt],
@@ -174,10 +249,11 @@ class GeminiClient implements GenAiClient
             && SpreadsheetToText::isAvailable()
         ) {
             // Spreadsheet fallback: extract cell data to text rather than fail.
-            $extracted = SpreadsheetToText::convert($fileBytes, $mimeType);
+            $extracted = SpreadsheetToText::convert($fileBytes, $mimeType, $this->conversionLimits);
             $parts = [['text' => $extracted], ['text' => $prompt]];
         } else {
             $this->assertSupportedDocumentMimeType($mimeType);
+            $this->assertInlineSizeWithinLimit($fileBytes, $mimeType);
             $parts = [
                 ['inline_data' => ['mime_type' => $mimeType, 'data' => $fileBytes]],
                 ['text' => $prompt],
@@ -255,7 +331,7 @@ class GeminiClient implements GenAiClient
      * Extract function/tool calls from a Gemini response.
      *
      * @param  array<string, mixed>  $response
-     * @return list<array{name: string, input: array<string, mixed>}>
+     * @return list<array{id: string, name: string, input: array<string, mixed>}>
      */
     public function extractToolCalls(array $response): array
     {
@@ -275,12 +351,76 @@ class GeminiClient implements GenAiClient
                 continue;
             }
             $calls[] = [
+                // Gemini correlates a functionResponse by name, not by id — it
+                // only sends an id for parallel calls, so this is often ''.
+                'id' => is_string($fn['id'] ?? null) ? $fn['id'] : '',
                 'name' => (string) $fn['name'],
                 'input' => is_array($fn['args'] ?? null) ? $fn['args'] : [],
             ];
         }
 
         return $calls;
+    }
+
+    /**
+     * Gemini 3 attaches a `thoughtSignature` to function-call parts and rejects a
+     * later turn whose history dropped it, so parts are replayed in order with
+     * every unmodelled key intact rather than rebuilt from text + tool calls.
+     *
+     * @param  array<string, mixed>  $response
+     * @return array{role: string, content: list<ContentBlock>}
+     */
+    public function extractAssistantMessage(array $response): array
+    {
+        $parts = $response['candidates'][0]['content']['parts'] ?? [];
+        $content = [];
+
+        if (is_array($parts)) {
+            foreach ($parts as $part) {
+                if (! is_array($part)) {
+                    continue;
+                }
+
+                if (isset($part['text']) && is_string($part['text'])) {
+                    $content[] = ContentBlock::text($part['text'], self::partMetadata($part, ['text']));
+
+                    continue;
+                }
+
+                $fn = $part['functionCall'] ?? null;
+                if (is_array($fn) && isset($fn['name'])) {
+                    $content[] = ContentBlock::toolCall(
+                        id: is_string($fn['id'] ?? null) ? $fn['id'] : '',
+                        name: (string) $fn['name'],
+                        input: is_array($fn['args'] ?? null) ? $fn['args'] : [],
+                        providerMetadata: self::partMetadata($part, ['functionCall']),
+                    );
+
+                    continue;
+                }
+
+                // Anything else (thought parts, future part kinds) is replayed as-is.
+                $content[] = ContentBlock::providerRaw($part);
+            }
+        }
+
+        return ['role' => 'assistant', 'content' => $content];
+    }
+
+    /**
+     * The keys of a part this package does not model, kept for replay.
+     *
+     * @param  array<string, mixed>  $part
+     * @param  list<string>  $modelled
+     * @return array<string, mixed>
+     */
+    private static function partMetadata(array $part, array $modelled): array
+    {
+        foreach ($modelled as $key) {
+            unset($part[$key]);
+        }
+
+        return $part;
     }
 
     public function checkCredentials(): bool
@@ -321,7 +461,13 @@ class GeminiClient implements GenAiClient
                 'Gemini list models',
             )->json() ?? [];
             foreach ($payload['models'] ?? [] as $entry) {
-                $id = (string) ($entry['name'] ?? '');
+                // `name` is the resource name ("models/gemini-3.6-flash"); the value
+                // generateContent expects is `baseModelId`. Returning the resource
+                // name would build ".../models/models/gemini-3.6-flash:generateContent".
+                // https://ai.google.dev/api/models
+                $id = isset($entry['baseModelId']) && is_string($entry['baseModelId'])
+                    ? $entry['baseModelId']
+                    : self::normaliseModelId((string) ($entry['name'] ?? ''));
                 if ($id === '') {
                     continue;
                 }
@@ -423,6 +569,19 @@ class GeminiClient implements GenAiClient
         return in_array($mimeType, self::SUPPORTED_DOCUMENT_MIME_TYPES, true);
     }
 
+    /**
+     * @throws GenAiFileTooLargeException
+     */
+    private function assertInlineSizeWithinLimit(string $base64, string $mimeType): void
+    {
+        FileLimits::assertWithin(
+            FileLimits::decodedLength($base64),
+            self::maxInlineFileBytes($mimeType),
+            'Gemini generateContent',
+            sprintf('inline %s content', $mimeType === '' ? 'file' : $mimeType),
+        );
+    }
+
     private function assertSupportedDocumentMimeType(string $mimeType): void
     {
         if (self::isSupportedDocumentMimeType($mimeType)) {
@@ -445,6 +604,51 @@ class GeminiClient implements GenAiClient
 
     private function contentBlockToGeminiPart(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_PROVIDER_RAW) {
+            return $block->providerMetadata;
+        }
+
+        if ($block->type === ContentBlock::TYPE_TOOL_CALL) {
+            $call = [
+                'name' => (string) $block->toolName,
+                'args' => ($block->toolInput ?? []) === [] ? (object) [] : $block->toolInput,
+            ];
+            if ((string) $block->toolCallId !== '') {
+                $call['id'] = (string) $block->toolCallId;
+            }
+
+            // thoughtSignature and friends ride back on the part they arrived on.
+            return $block->providerMetadata + ['functionCall' => $call];
+        }
+
+        if ($block->type === ContentBlock::TYPE_TOOL_RESULT) {
+            if ((string) $block->toolName === '') {
+                throw new GenAiFatalException(
+                    'Gemini matches a tool result to its call by function name, not by id, so a '
+                    .'tool_result block needs one. Build it with ContentBlock::toolResultFor($call, …) '
+                    .'or pass toolName: to ContentBlock::toolResult().'
+                );
+            }
+
+            $response = [
+                'name' => (string) $block->toolName,
+                // functionResponse.response must be a JSON object, never a scalar.
+                'response' => $block->toolResultAsArray() === [] ? (object) [] : $block->toolResultAsArray(),
+            ];
+            if ((string) $block->toolCallId !== '') {
+                $response['id'] = (string) $block->toolCallId;
+            }
+
+            return ['functionResponse' => $response];
+        }
+
+        if ($block->type === ContentBlock::TYPE_FILE_REFERENCE) {
+            $mime = (string) $block->mimeType;
+            $this->assertSupportedDocumentMimeType($mime);
+
+            return ['file_data' => ['mime_type' => $mime, 'file_uri' => (string) $block->fileRef]];
+        }
+
         if ($block->type === 'document') {
             $mime = (string) $block->mimeType;
 
@@ -452,7 +656,8 @@ class GeminiClient implements GenAiClient
                 && WordDocumentToPdf::supports($mime)
                 && WordDocumentToPdf::isAvailable()
             ) {
-                $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime);
+                $pdfB64 = WordDocumentToPdf::convert((string) $block->base64, $mime, $this->conversionLimits);
+                $this->assertInlineSizeWithinLimit($pdfB64, 'application/pdf');
 
                 return ['inline_data' => ['mime_type' => 'application/pdf', 'data' => $pdfB64]];
             }
@@ -461,15 +666,16 @@ class GeminiClient implements GenAiClient
                 && SpreadsheetToText::supports($mime)
                 && SpreadsheetToText::isAvailable()
             ) {
-                return ['text' => SpreadsheetToText::convert((string) $block->base64, $mime)];
+                return ['text' => SpreadsheetToText::convert((string) $block->base64, $mime, $this->conversionLimits)];
             }
 
             $this->assertSupportedDocumentMimeType($mime);
+            $this->assertInlineSizeWithinLimit((string) $block->base64, $mime);
 
             return ['inline_data' => ['mime_type' => $mime, 'data' => $block->base64]];
         }
 
-        return ['text' => $block->text ?? ''];
+        return $block->providerMetadata + ['text' => $block->text ?? ''];
     }
 
     /**
@@ -570,6 +776,8 @@ class GeminiClient implements GenAiClient
      */
     private function doGenerateContent(array $payload): array
     {
+        FileLimits::assertRequestWithin($payload, self::maxRequestBytes(), 'Gemini generateContent');
+
         $url = self::BASE_URL."/v1beta/models/{$this->model}:generateContent";
 
         $response = $this->retry->execute(

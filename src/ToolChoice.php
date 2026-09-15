@@ -8,10 +8,13 @@ namespace Bherila\GenAiLaravel;
  * Provider mappings:
  *   auto()        — Gemini AUTO  | Bedrock auto:{}   | Anthropic {type:"auto"}
  *   any()         — Gemini ANY   | Bedrock any:{}    | Anthropic {type:"any"}
- *   none()        — Gemini NONE  | Bedrock (omit)    | Anthropic {type:"none"}
+ *   none()        — Gemini NONE  | Bedrock (see below) | Anthropic {type:"none"}
  *   tool($name)   — Gemini ANY + allowedFunctionNames:[$name]
  *                   Bedrock tool:{name:$name}
  *                   Anthropic {type:"tool", name:$name}
+ *
+ * Bedrock has no `none` value: an omitted toolChoice means *auto* there, so the
+ * client drops the whole toolConfig — tool definitions included — for none().
  */
 final class ToolChoice
 {

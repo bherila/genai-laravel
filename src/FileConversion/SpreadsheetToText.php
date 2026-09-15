@@ -3,6 +3,8 @@
 namespace Bherila\GenAiLaravel\FileConversion;
 
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\FileLimits;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 
@@ -54,8 +56,14 @@ final class SpreadsheetToText
      * Multi-sheet workbooks are concatenated with a `=== Sheet: <name> ===` header
      * before each sheet so the model can tell them apart.
      */
-    public static function convert(string $base64, string $mimeType): string
+    public static function convert(string $base64, string $mimeType, ?ConversionLimits $limits = null): string
     {
+        $limits ??= ConversionLimits::fromConfig();
+        // The clock starts here, not after load(): parsing the workbook is the
+        // slowest part of a conversion, so a deadline that began afterwards
+        // would exclude the very work it is meant to bound.
+        $deadline = microtime(true) + $limits->maxSeconds;
+
         if (! self::isAvailable()) {
             throw new GenAiFatalException(
                 'SpreadsheetToText requires phpoffice/phpspreadsheet. '
@@ -76,6 +84,19 @@ final class SpreadsheetToText
             throw new GenAiFatalException('SpreadsheetToText: input is not valid base64.');
         }
 
+        if (strlen($bytes) > $limits->maxInputBytes) {
+            throw new GenAiFileTooLargeException(
+                sprintf(
+                    'SpreadsheetToText: document is %s, above the %s conversion limit. '
+                    .'Raise ConversionLimits::$maxInputBytes to accept documents this large.',
+                    FileLimits::humanBytes(strlen($bytes)),
+                    FileLimits::humanBytes($limits->maxInputBytes),
+                ),
+                actualBytes: strlen($bytes),
+                limitBytes: $limits->maxInputBytes,
+            );
+        }
+
         $tmp = tempnam(sys_get_temp_dir(), 'genai_xlsx_');
         if ($tmp === false) {
             throw new GenAiFatalException('SpreadsheetToText: failed to allocate temp file for conversion.');
@@ -87,32 +108,83 @@ final class SpreadsheetToText
             }
 
             try {
-                $spreadsheet = IOFactory::load($tmp);
+                $reader = IOFactory::createReaderForFile($tmp);
+                // Formatting is irrelevant to a text extract and is the bulk of the
+                // memory an XLSX costs to load, so never materialise it.
+                $reader->setReadDataOnly(true);
+                $spreadsheet = $reader->load($tmp);
             } catch (\Throwable $e) {
                 throw new GenAiFatalException('SpreadsheetToText: failed to read spreadsheet — '.$e->getMessage(), 0, $e);
             }
 
-            return self::renderSpreadsheet($spreadsheet);
+            return self::renderSpreadsheet($spreadsheet, $limits, $deadline);
         } finally {
             @unlink($tmp);
         }
     }
 
-    private static function renderSpreadsheet(Spreadsheet $spreadsheet): string
+    /**
+     * Renders under the supplied ceilings, appending a truncation marker rather
+     * than throwing: a partial extract is still useful to the model, and a
+     * silent one would be worse than either.
+     *
+     * @param  float  $deadline  microtime(true) value past which extraction stops.
+     */
+    private static function renderSpreadsheet(Spreadsheet $spreadsheet, ConversionLimits $limits, float $deadline): string
     {
         $parts = [];
-        foreach ($spreadsheet->getAllSheets() as $sheet) {
-            $parts[] = '=== Sheet: '.$sheet->getTitle().' ===';
+        $cells = 0;
+        $bytes = 0;
+        $truncated = null;
 
-            // toArray returns a rectangular grid covering the used range.
-            foreach ($sheet->toArray(null, true, true, false) as $row) {
-                $cells = array_map(
-                    fn ($v) => $v === null ? '' : (string) $v,
-                    $row,
-                );
-                $parts[] = implode("\t", $cells);
+        foreach ($spreadsheet->getAllSheets() as $sheet) {
+            if ($truncated !== null) {
+                break;
             }
+
+            $header = '=== Sheet: '.$sheet->getTitle().' ===';
+            $parts[] = $header;
+            $bytes += strlen($header) + 1;
+            $rows = 0;
+
+            // Row iteration streams the used range instead of materialising the
+            // whole rectangular grid the way toArray() does.
+            foreach ($sheet->getRowIterator() as $row) {
+                if (++$rows > $limits->maxRowsPerSheet) {
+                    $truncated = sprintf('row limit of %d per sheet', $limits->maxRowsPerSheet);
+                    break;
+                }
+                if (microtime(true) > $deadline) {
+                    $truncated = sprintf('time limit of %.0fs', $limits->maxSeconds);
+                    break;
+                }
+
+                $values = [];
+                foreach ($row->getCellIterator() as $cell) {
+                    if (++$cells > $limits->maxCells) {
+                        $truncated = sprintf('cell limit of %d', $limits->maxCells);
+                        break;
+                    }
+                    $values[] = $cell->getFormattedValue();
+                }
+
+                $line = rtrim(implode("\t", $values), "\t");
+                $bytes += strlen($line) + 1;
+                $parts[] = $line;
+
+                if ($bytes > $limits->maxOutputBytes) {
+                    $truncated = sprintf('output limit of %s', FileLimits::humanBytes($limits->maxOutputBytes));
+                }
+                if ($truncated !== null) {
+                    break;
+                }
+            }
+
             $parts[] = '';
+        }
+
+        if ($truncated !== null) {
+            $parts[] = '=== Truncated: extraction stopped at the '.$truncated.' ===';
         }
 
         return rtrim(implode("\n", $parts), "\n")."\n";

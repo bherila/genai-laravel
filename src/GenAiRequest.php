@@ -24,7 +24,7 @@ final class GenAiRequest
 
     private string $promptText = '';
 
-    /** @var list<array{base64: string, mimeType: string}> */
+    /** @var list<ContentBlock> */
     private array $files = [];
 
     private ?ToolConfig $toolConfig = null;
@@ -71,20 +71,52 @@ final class GenAiRequest
     public function withFile(string $base64, string $mimeType): static
     {
         $clone = clone $this;
-        $clone->files[] = ['base64' => $base64, 'mimeType' => $mimeType];
+        $clone->files[] = ContentBlock::document($base64, $mimeType);
 
         return $clone;
     }
 
     /**
-     * Set the inline files for this request (replaces any previously added files).
+     * Reference a file already uploaded through the provider's File API.
      *
-     * @param  list<array{base64: string, mimeType: string}>  $files
+     * Pairs with GenAiClient::uploadFile(), and keeps the call site identical to
+     * withFile() — only providers where supportsFileApi() is true accept it.
+     *
+     *   $ref = $client->uploadFile($stream, 'application/pdf', 'report.pdf');
+     *   try {
+     *       $response = GenAiRequest::with($client)
+     *           ->withFileRef($ref, 'application/pdf')
+     *           ->prompt('Summarise this report.')
+     *           ->generate();
+     *   } finally {
+     *       $client->deleteFile($ref);
+     *   }
+     */
+    public function withFileRef(string $fileRef, string $mimeType): static
+    {
+        $clone = clone $this;
+        $clone->files[] = ContentBlock::fileReference($fileRef, $mimeType);
+
+        return $clone;
+    }
+
+    /**
+     * Set the files for this request (replaces any previously added files).
+     *
+     * Accepts ContentBlock instances — so uploaded-file references and inline
+     * bytes can be mixed — or the `['base64' => …, 'mimeType' => …]` shape.
+     *
+     * @param  list<ContentBlock|array{base64: string, mimeType: string}>  $files
      */
     public function withFiles(array $files): static
     {
         $clone = clone $this;
-        $clone->files = $files;
+        $clone->files = array_map(
+            fn (ContentBlock|array $file) => $file instanceof ContentBlock
+                ? $file
+                : ContentBlock::document($file['base64'], $file['mimeType']),
+            $files,
+        );
 
         return $clone;
     }
@@ -133,17 +165,14 @@ final class GenAiRequest
             toolCalls: $this->client->extractToolCalls($raw),
             usage: $this->client->extractUsage($raw),
             raw: $raw,
+            assistantMessage: $this->client->extractAssistantMessage($raw),
         );
     }
 
     /** @return list<array{role: string, content: list<ContentBlock>}> */
     private function buildMessages(): array
     {
-        $content = [];
-
-        foreach ($this->files as $file) {
-            $content[] = ContentBlock::document($file['base64'], $file['mimeType']);
-        }
+        $content = $this->files;
 
         if ($this->promptText !== '') {
             $content[] = ContentBlock::text($this->promptText);

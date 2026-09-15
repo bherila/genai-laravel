@@ -26,6 +26,27 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Office-document conversion limits
+    |--------------------------------------------------------------------------
+    | Applied when a client converts an Office document on your behalf — DOCX to
+    | PDF, XLSX to text. These are best-effort guards against runaway documents
+    | (a huge export, a sparse sheet with a cell at XFD1048576), NOT a security
+    | boundary: only `max_input_bytes` is checked before the file reaches
+    | PhpSpreadsheet or PhpWord, and neither library can be interrupted once it
+    | starts. Converting documents from untrusted users safely needs a separate
+    | process with an enforced memory cap and CPU limit. See the
+    | ConversionLimits class docblock.
+    */
+    'conversion' => [
+        'max_input_bytes' => (int) env('GENAI_CONVERSION_MAX_INPUT_BYTES', 33554432),
+        'max_output_bytes' => (int) env('GENAI_CONVERSION_MAX_OUTPUT_BYTES', 33554432),
+        'max_rows_per_sheet' => (int) env('GENAI_CONVERSION_MAX_ROWS_PER_SHEET', 100000),
+        'max_cells' => (int) env('GENAI_CONVERSION_MAX_CELLS', 2000000),
+        'max_seconds' => (float) env('GENAI_CONVERSION_MAX_SECONDS', 60),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Pricing table (USD per million tokens)
     |--------------------------------------------------------------------------
     | No provider catalog API returns pricing, so listModels() always leaves
@@ -42,10 +63,10 @@ return [
         //     'claude-sonnet-4-6' => ['input' => 3.0, 'output' => 15.0],
         // ],
         // 'bedrock' => [
-        //     'us.anthropic.claude-haiku-4-20250514-v1:0' => ['input' => 0.8, 'output' => 4.0],
+        //     'us.anthropic.claude-haiku-4-5-20251001-v1:0' => ['input' => 0.8, 'output' => 4.0],
         // ],
         // 'gemini' => [
-        //     'gemini-2.0-flash' => ['input' => 0.1, 'output' => 0.4],
+        //     'gemini-3.6-flash' => ['input' => 0.1, 'output' => 0.4],
         // ],
     ],
 
@@ -57,12 +78,18 @@ return [
         |--------------------------------------------------------------------------
         */
         'gemini' => [
-            // API key. Per-user keys can be set dynamically via GenAiClientFactory::make()
-            // with a custom key override; this is the site-wide fallback.
+            // Site-wide API key. For per-user or per-tenant keys, pass credentials
+            // to the factory instead of relying on config:
+            //   GenAiClientFactory::make(credentials: new GeminiCredentials(apiKey: $key))
             'api_key' => env('GEMINI_API_KEY'),
 
-            // Model ID. See https://ai.google.dev/gemini-api/docs/models/gemini
-            'model' => env('GEMINI_MODEL', 'gemini-2.0-flash'),
+            // Model ID. Pin this explicitly in your own .env: Google retires Gemini
+            // models on a published schedule, and this default is a placeholder
+            // that keeps the package bootable rather than a recommendation — it
+            // is not tracked for currency.
+            // See https://ai.google.dev/gemini-api/docs/models/gemini and
+            // https://ai.google.dev/gemini-api/docs/deprecations
+            'model' => env('GEMINI_MODEL', 'gemini-3.6-flash'),
 
             // HTTP timeout in seconds for long-running inference calls.
             'timeout' => (int) env('GEMINI_TIMEOUT', 240),
@@ -108,8 +135,13 @@ return [
             // AWS region.
             'region' => env('BEDROCK_REGION', 'us-east-1'),
 
-            // Bedrock model ID or inference profile ARN.
-            'model' => env('BEDROCK_MODEL', 'us.anthropic.claude-haiku-4-20250514-v1:0'),
+            // Bedrock model ID or inference profile ARN. The default is the US
+            // cross-region inference profile for Claude Haiku 4.5; other regions
+            // and data-residency requirements need a different prefix
+            // (`anthropic.` for in-region, `eu.` / `apac.` / `global.` otherwise),
+            // so pin BEDROCK_MODEL explicitly rather than relying on this default.
+            // https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-4-5.html
+            'model' => env('BEDROCK_MODEL', 'us.anthropic.claude-haiku-4-5-20251001-v1:0'),
 
             // HTTP timeout in seconds for long-running inference calls.
             'timeout' => (int) env('BEDROCK_TIMEOUT', 240),

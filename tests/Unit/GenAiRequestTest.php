@@ -2,6 +2,7 @@
 
 namespace Bherila\GenAiLaravel\Tests\Unit;
 
+use Bherila\GenAiLaravel\Clients\AnthropicClient;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\GenAiRequest;
 use Bherila\GenAiLaravel\GenAiResponse;
@@ -31,9 +32,9 @@ class GenAiRequestTest extends TestCase
         ];
     }
 
-    private function makeAnthropicClient(): \Bherila\GenAiLaravel\Clients\AnthropicClient
+    private function makeAnthropicClient(): AnthropicClient
     {
-        return new \Bherila\GenAiLaravel\Clients\AnthropicClient(
+        return new AnthropicClient(
             apiKey: 'test-key',
             model: 'claude-sonnet-4-6',
         );
@@ -112,6 +113,44 @@ class GenAiRequestTest extends TestCase
                 && ($content[0]['source']['data'] ?? '') === $b1
                 && ($content[1]['source']['data'] ?? '') === $b2
                 && ($content[2]['type'] ?? '') === 'text';
+        });
+    }
+
+    public function test_generate_with_file_ref_references_the_uploaded_file(): void
+    {
+        Http::fake(['*' => Http::response($this->fakeAnthropicResponse())]);
+
+        GenAiRequest::with($this->makeAnthropicClient())
+            ->withFileRef('file_abc123', 'application/pdf')
+            ->prompt('Summarise this report.')
+            ->generate();
+
+        Http::assertSent(function (Request $req) {
+            $content = $req->data()['messages'][0]['content'] ?? [];
+
+            return ($content[0]['source']['type'] ?? '') === 'file'
+                && ($content[0]['source']['file_id'] ?? '') === 'file_abc123'
+                && ($content[1]['text'] ?? '') === 'Summarise this report.';
+        });
+    }
+
+    public function test_with_files_accepts_content_blocks_alongside_the_array_shape(): void
+    {
+        Http::fake(['*' => Http::response($this->fakeAnthropicResponse())]);
+
+        GenAiRequest::with($this->makeAnthropicClient())
+            ->withFiles([
+                ContentBlock::fileReference('file_uploaded', 'application/pdf'),
+                ['base64' => base64_encode('inline pdf'), 'mimeType' => 'application/pdf'],
+            ])
+            ->prompt('Compare these.')
+            ->generate();
+
+        Http::assertSent(function (Request $req) {
+            $content = $req->data()['messages'][0]['content'] ?? [];
+
+            return ($content[0]['source']['type'] ?? '') === 'file'
+                && ($content[1]['source']['type'] ?? '') === 'base64';
         });
     }
 

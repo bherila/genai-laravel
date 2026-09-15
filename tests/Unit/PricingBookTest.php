@@ -17,10 +17,10 @@ class PricingBookTest extends TestCase
                 'claude-sonnet-4-6' => ['input' => 3.0, 'output' => 15.0, 'cache_read' => 0.3, 'cache_creation' => 3.75],
             ],
             'bedrock' => [
-                'us.anthropic.claude-haiku-4-20250514-v1:0' => ['input' => 0.8, 'output' => 4.0],
+                'us.anthropic.claude-haiku-4-5-20251001-v1:0' => ['input' => 0.8, 'output' => 4.0],
             ],
             'gemini' => [
-                'gemini-2.0-flash' => ['input' => 0.1, 'output' => 0.4],
+                'gemini-3.6-flash' => ['input' => 0.1, 'output' => 0.4],
             ],
         ]);
 
@@ -31,11 +31,11 @@ class PricingBookTest extends TestCase
         $this->assertSame(0.3, $anthropic->cacheReadPerMillion);
         $this->assertSame(3.75, $anthropic->cacheCreationPerMillion);
 
-        $bedrock = $book->priceFor('bedrock', 'us.anthropic.claude-haiku-4-20250514-v1:0');
+        $bedrock = $book->priceFor('bedrock', 'us.anthropic.claude-haiku-4-5-20251001-v1:0');
         $this->assertSame(0.8, $bedrock->inputPerMillion);
         $this->assertNull($bedrock->cacheReadPerMillion);
 
-        $gemini = $book->priceFor('gemini', 'gemini-2.0-flash');
+        $gemini = $book->priceFor('gemini', 'gemini-3.6-flash');
         $this->assertSame(0.1, $gemini->inputPerMillion);
         $this->assertSame(0.4, $gemini->outputPerMillion);
     }
@@ -50,14 +50,14 @@ class PricingBookTest extends TestCase
     {
         $book = PricingBook::fromArray([
             'anthropic' => ['claude-sonnet-4-6' => ['input' => 3.0, 'output' => 15.0]],
-            'bedrock' => ['us.anthropic.claude-haiku-4-20250514-v1:0' => ['input' => 0.8, 'output' => 4.0]],
-            'gemini' => ['gemini-2.0-flash' => ['input' => 0.1, 'output' => 0.4]],
+            'bedrock' => ['us.anthropic.claude-haiku-4-5-20251001-v1:0' => ['input' => 0.8, 'output' => 4.0]],
+            'gemini' => ['gemini-3.6-flash' => ['input' => 0.1, 'output' => 0.4]],
         ]);
 
         foreach ([
             ['anthropic', 'claude-sonnet-4-6', 3.0, 15.0],
-            ['bedrock', 'us.anthropic.claude-haiku-4-20250514-v1:0', 0.8, 4.0],
-            ['gemini', 'gemini-2.0-flash', 0.1, 0.4],
+            ['bedrock', 'us.anthropic.claude-haiku-4-5-20251001-v1:0', 0.8, 4.0],
+            ['gemini', 'gemini-3.6-flash', 0.1, 0.4],
         ] as [$provider, $id, $in, $out]) {
             $enriched = $book->enrich(new ModelInfo(id: $id, name: $id, provider: $provider));
             $this->assertSame($in, $enriched->inputCostPerMillionTokens, "$provider input");
@@ -92,11 +92,11 @@ class PricingBookTest extends TestCase
     public function test_enrich_all_maps_list(): void
     {
         $book = PricingBook::fromArray([
-            'gemini' => ['gemini-2.0-flash' => ['input' => 0.1, 'output' => 0.4]],
+            'gemini' => ['gemini-3.6-flash' => ['input' => 0.1, 'output' => 0.4]],
         ]);
 
         $out = $book->enrichAll([
-            new ModelInfo(id: 'gemini-2.0-flash', name: 'Flash', provider: 'gemini'),
+            new ModelInfo(id: 'gemini-3.6-flash', name: 'Flash', provider: 'gemini'),
             new ModelInfo(id: 'unknown', name: 'Unknown', provider: 'gemini'),
         ]);
 
@@ -125,11 +125,11 @@ class PricingBookTest extends TestCase
     public function test_from_config_reads_genai_pricing(): void
     {
         config()->set('genai.pricing', [
-            'bedrock' => ['us.anthropic.claude-haiku-4-20250514-v1:0' => ['input' => 0.8, 'output' => 4.0]],
+            'bedrock' => ['us.anthropic.claude-haiku-4-5-20251001-v1:0' => ['input' => 0.8, 'output' => 4.0]],
         ]);
 
         $book = PricingBook::fromConfig();
-        $price = $book->priceFor('bedrock', 'us.anthropic.claude-haiku-4-20250514-v1:0');
+        $price = $book->priceFor('bedrock', 'us.anthropic.claude-haiku-4-5-20251001-v1:0');
 
         $this->assertSame(0.8, $price->inputPerMillion);
         $this->assertSame(4.0, $price->outputPerMillion);

@@ -20,7 +20,7 @@ class WordDocumentToPdfTest extends TestCase
     /** Build a tiny single-paragraph DOCX and return it as base64. */
     private function makeDocxBase64(string $paragraph = 'Hello from PhpWord.'): string
     {
-        $phpWord = new PhpWord();
+        $phpWord = new PhpWord;
         $section = $phpWord->addSection();
         $section->addText($paragraph);
 

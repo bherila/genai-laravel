@@ -5,7 +5,9 @@ namespace Bherila\GenAiLaravel\Tests\Unit;
 use Bherila\GenAiLaravel\Clients\BedrockClient;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
 use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -20,7 +22,7 @@ class BedrockClientTest extends TestCase
     {
         return new BedrockClient(
             apiKey: 'test-key',
-            modelId: 'us.anthropic.claude-haiku-4-20250514-v1:0',
+            modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
             region: 'us-east-1',
         );
     }
@@ -41,7 +43,7 @@ class BedrockClientTest extends TestCase
     {
         $client = new BedrockClient(
             apiKey: 'test-key',
-            modelId: 'us.anthropic.claude-haiku-4-20250514-v1:0',
+            modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
             region: 'us-east-1',
             timeout: 360,
         );
@@ -49,9 +51,26 @@ class BedrockClientTest extends TestCase
         $this->assertSame(360, $this->pendingRequestOptions($client)['timeout'] ?? null);
     }
 
-    public function test_max_file_bytes_is_4_5_mb(): void
+    public function test_inline_document_limit_is_4_5_mb(): void
     {
-        $this->assertSame(4_718_592, BedrockClient::maxFileBytes());
+        $this->assertSame(4_718_592, BedrockClient::maxInlineFileBytes('application/pdf'));
+    }
+
+    public function test_inline_image_limit_is_3_75_mb(): void
+    {
+        $this->assertSame(3_932_160, BedrockClient::maxInlineFileBytes('image/png'));
+    }
+
+    public function test_has_no_uploaded_file_limit_because_there_is_no_file_api(): void
+    {
+        $this->assertNull(BedrockClient::maxUploadedFileBytes());
+        $this->assertFalse(BedrockClient::supportsFileApi());
+    }
+
+    public function test_documents_and_images_have_separate_per_message_caps(): void
+    {
+        $this->assertSame(5, BedrockClient::maxInlineBlocksPerMessage('application/pdf'));
+        $this->assertSame(20, BedrockClient::maxInlineBlocksPerMessage('image/png'));
     }
 
     /**
@@ -72,11 +91,12 @@ class BedrockClientTest extends TestCase
         return $optionsProperty->getValue($pendingRequest);
     }
 
-    // ── upload / delete (no-ops) ─────────────────────────────────────────────
+    // ── file API (unsupported) ───────────────────────────────────────────────
 
-    public function test_upload_file_returns_null(): void
+    public function test_upload_file_throws_unsupported_operation(): void
     {
-        $this->assertNull($this->makeClient()->uploadFile('bytes', 'application/pdf'));
+        $this->expectException(GenAiUnsupportedOperationException::class);
+        $this->makeClient()->uploadFile('bytes', 'application/pdf');
     }
 
     public function test_delete_file_is_noop(): void
@@ -85,10 +105,82 @@ class BedrockClientTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
-    public function test_converse_with_file_ref_throws_logic_exception(): void
+    public function test_converse_with_file_ref_throws_unsupported_operation(): void
     {
-        $this->expectException(\LogicException::class);
+        $this->expectException(GenAiUnsupportedOperationException::class);
         $this->makeClient()->converseWithFileRef('files/abc', 'application/pdf', 'test');
+    }
+
+    public function test_file_reference_content_block_throws_unsupported_operation(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $this->expectException(GenAiUnsupportedOperationException::class);
+        $this->makeClient()->converse('', [[
+            'role' => 'user',
+            'content' => [ContentBlock::fileReference('file_abc', 'application/pdf')],
+        ]]);
+    }
+
+    // ── size and count limits ────────────────────────────────────────────────
+
+    public function test_oversized_inline_document_is_rejected_before_the_request(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $oversized = str_repeat('A', 4 * (int) ceil((BedrockClient::maxInlineFileBytes('application/pdf') + 1) / 3));
+
+        try {
+            $this->makeClient()->converseWithInlineFile($oversized, 'application/pdf', 'Summarize.');
+            $this->fail('Expected GenAiFileTooLargeException.');
+        } catch (GenAiFileTooLargeException $e) {
+            $this->assertSame(4_718_592, $e->limitBytes);
+            $this->assertGreaterThan($e->limitBytes, $e->actualBytes);
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_images_are_counted_against_their_own_cap_not_the_document_one(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $content = [];
+        for ($i = 0; $i < 6; $i++) {
+            $content[] = ContentBlock::document(base64_encode('png'), 'image/png');
+        }
+
+        // Six images is fine — only six *documents* would not be.
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => $content]]);
+
+        Http::assertSentCount(1);
+    }
+
+    public function test_more_than_five_documents_in_one_message_is_rejected(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $content = [];
+        for ($i = 0; $i < 6; $i++) {
+            $content[] = ContentBlock::document(base64_encode('pdf'), 'application/pdf');
+        }
+
+        $this->expectException(GenAiFatalException::class);
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => $content]]);
+    }
+
+    public function test_five_documents_in_one_message_is_allowed(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $content = [];
+        for ($i = 0; $i < 5; $i++) {
+            $content[] = ContentBlock::document(base64_encode('pdf'), 'application/pdf');
+        }
+
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => $content]]);
+
+        Http::assertSentCount(1);
     }
 
     // ── converse ─────────────────────────────────────────────────────────────
@@ -258,7 +350,12 @@ class BedrockClientTest extends TestCase
         });
     }
 
-    public function test_none_tool_choice_omits_tool_choice_key(): void
+    /**
+     * Bedrock treats an absent toolChoice as `auto`, so leaving the tool
+     * definitions in the payload would still let the model call one. The only
+     * way to express "no tools" is to send no toolConfig at all.
+     */
+    public function test_none_tool_choice_omits_the_entire_tool_config(): void
     {
         Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
 
@@ -272,8 +369,23 @@ class BedrockClientTest extends TestCase
         Http::assertSent(function (Request $req) {
             $body = $req->data();
 
-            return isset($body['toolConfig']['tools']) && ! array_key_exists('toolChoice', $body['toolConfig']);
+            return ! array_key_exists('toolConfig', $body)
+                && ! str_contains($req->body(), 'my_tool');
         });
+    }
+
+    public function test_auto_tool_choice_is_sent_explicitly(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => []]]])]);
+
+        $toolConfig = new ToolConfig(
+            tools: [new ToolDefinition('my_tool', 'desc', Schema::object([]))],
+            choice: ToolChoice::auto(),
+        );
+
+        $this->makeClient()->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]], $toolConfig);
+
+        Http::assertSent(fn (Request $req) => str_contains($req->body(), '"auto":{}'));
     }
 
     // ── extractText ───────────────────────────────────────────────────────────

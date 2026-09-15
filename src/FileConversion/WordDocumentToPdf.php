@@ -3,6 +3,10 @@
 namespace Bherila\GenAiLaravel\FileConversion;
 
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\FileLimits;
+use Dompdf\Dompdf;
+use Mpdf\Mpdf;
 use PhpOffice\PhpWord\IOFactory;
 use PhpOffice\PhpWord\Settings;
 
@@ -53,13 +57,13 @@ final class WordDocumentToPdf
     }
 
     /**
-     * @return array{0: string, 1: string}|null  [rendererName, rendererClass]
+     * @return array{0: string, 1: string}|null [rendererName, rendererClass]
      */
     private static function detectPdfRenderer(): ?array
     {
         $candidates = [
-            [Settings::PDF_RENDERER_DOMPDF, \Dompdf\Dompdf::class],
-            [Settings::PDF_RENDERER_MPDF, \Mpdf\Mpdf::class],
+            [Settings::PDF_RENDERER_DOMPDF, Dompdf::class],
+            [Settings::PDF_RENDERER_MPDF, Mpdf::class],
             [Settings::PDF_RENDERER_TCPDF, \TCPDF::class],
         ];
         foreach ($candidates as $entry) {
@@ -77,8 +81,11 @@ final class WordDocumentToPdf
      * Returned value is ready to drop into a `document` content block with
      * mime_type `application/pdf`.
      */
-    public static function convert(string $base64, string $mimeType): string
+    public static function convert(string $base64, string $mimeType, ?ConversionLimits $limits = null): string
     {
+        $limits ??= ConversionLimits::fromConfig();
+        $deadline = microtime(true) + $limits->maxSeconds;
+
         if (! class_exists(IOFactory::class)) {
             throw new GenAiFatalException(
                 'WordDocumentToPdf requires phpoffice/phpword. Install with: '
@@ -105,6 +112,22 @@ final class WordDocumentToPdf
         $bytes = base64_decode($base64, true);
         if ($bytes === false) {
             throw new GenAiFatalException('WordDocumentToPdf: input is not valid base64.');
+        }
+
+        // The only check that happens before PhpWord opens the file. It bounds
+        // the compressed upload, not what a DOCX or ODT unpacks into — see
+        // ConversionLimits for why that is not a defence against a hostile file.
+        if (strlen($bytes) > $limits->maxInputBytes) {
+            throw new GenAiFileTooLargeException(
+                sprintf(
+                    'WordDocumentToPdf: document is %s, above the %s conversion limit. '
+                    .'Raise ConversionLimits::$maxInputBytes to accept documents this large.',
+                    FileLimits::humanBytes(strlen($bytes)),
+                    FileLimits::humanBytes($limits->maxInputBytes),
+                ),
+                actualBytes: strlen($bytes),
+                limitBytes: $limits->maxInputBytes,
+            );
         }
 
         $readerName = self::readerNameForMime($mimeType);
@@ -144,6 +167,11 @@ final class WordDocumentToPdf
                 );
             }
 
+            // Neither PhpWord nor the PDF renderer can be interrupted from here,
+            // so the budget is checked between them: a document that already
+            // spent it parsing does not also get to spend it rendering.
+            self::assertBudgetRemaining($deadline, $limits, 'reading the document');
+
             try {
                 $writer = IOFactory::createWriter($phpWord, 'PDF');
                 $writer->save($outputTmp);
@@ -155,9 +183,23 @@ final class WordDocumentToPdf
                 );
             }
 
+            self::assertBudgetRemaining($deadline, $limits, 'rendering the PDF');
+
             $pdfBytes = file_get_contents($outputTmp);
             if ($pdfBytes === false || $pdfBytes === '') {
                 throw new GenAiFatalException('WordDocumentToPdf: renderer produced an empty PDF.');
+            }
+
+            if (strlen($pdfBytes) > $limits->maxOutputBytes) {
+                throw new GenAiFileTooLargeException(
+                    sprintf(
+                        'WordDocumentToPdf: rendered PDF is %s, above the %s conversion limit.',
+                        FileLimits::humanBytes(strlen($pdfBytes)),
+                        FileLimits::humanBytes($limits->maxOutputBytes),
+                    ),
+                    actualBytes: strlen($pdfBytes),
+                    limitBytes: $limits->maxOutputBytes,
+                );
             }
 
             return base64_encode($pdfBytes);
@@ -165,6 +207,28 @@ final class WordDocumentToPdf
             @unlink($inputTmp);
             @unlink($outputTmp);
         }
+    }
+
+    /**
+     * Abort a conversion that has already outrun its wall-clock budget.
+     *
+     * @param  float  $deadline  microtime(true) value the conversion must finish by.
+     * @param  string  $stage  What has just completed, named in the error.
+     *
+     * @throws GenAiFatalException
+     */
+    private static function assertBudgetRemaining(float $deadline, ConversionLimits $limits, string $stage): void
+    {
+        if (microtime(true) <= $deadline) {
+            return;
+        }
+
+        throw new GenAiFatalException(sprintf(
+            'WordDocumentToPdf: conversion exceeded its %.0fs budget while %s. '
+            .'Raise ConversionLimits::$maxSeconds, or convert this document out of band.',
+            $limits->maxSeconds,
+            $stage,
+        ));
     }
 
     private static function readerNameForMime(string $mimeType): string

@@ -5,6 +5,8 @@ namespace Bherila\GenAiLaravel\Clients;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
+use Bherila\GenAiLaravel\FileLimits;
 use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
@@ -18,7 +20,8 @@ use Illuminate\Support\Facades\Http;
  * AWS Bedrock Converse API implementation of GenAiClient.
  *
  * Bedrock does not have a separate File API — files must be embedded as base64
- * inline document blocks. uploadFile() returns null and deleteFile() is a no-op.
+ * inline document blocks. uploadFile() throws GenAiUnsupportedOperationException
+ * (supportsFileApi() returns false) and deleteFile() is a no-op.
  *
  * ToolConfig is translated to Bedrock toolSpec + toolChoice format.
  * ContentBlock objects are converted to Bedrock content block format.
@@ -31,7 +34,7 @@ use Illuminate\Support\Facades\Http;
  *   api_key        — Bearer token used for the Authorization header
  *   session_token  — optional; sent as X-Amz-Security-Token header
  *   region         — AWS region, e.g. "us-east-1" (default: "us-east-1")
- *   model          — model ID, e.g. "us.anthropic.claude-haiku-4-20250514-v1:0"
+ *   model          — model ID, e.g. "us.anthropic.claude-haiku-4-5-20251001-v1:0"
  *   timeout        — HTTP timeout in seconds (default: 240)
  */
 class BedrockClient implements GenAiClient
@@ -81,27 +84,57 @@ class BedrockClient implements GenAiClient
     }
 
     /**
-     * Bedrock Converse API hard limit per document block.
+     * Bedrock Converse limits documents and images separately.
      * https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference-supported-models-features.html
      */
-    public static function maxFileBytes(): int
+    public static function maxInlineFileBytes(string $mimeType): int
     {
-        return 4_718_592; // 4.5 MB
+        return isset(self::MIME_TO_IMAGE_FORMAT[$mimeType])
+            ? 3_932_160  // 3.75 MB per image block
+            : 4_718_592; // 4.5 MB per document block
     }
 
-    /** Bedrock has no File API — always returns null. */
-    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): ?string
+    /** Bedrock has no File API, so there is no uploaded-file limit. */
+    public static function maxUploadedFileBytes(): ?int
     {
         return null;
+    }
+
+    /** Converse counts documents and images separately: five and twenty per message. */
+    public static function maxInlineBlocksPerMessage(string $mimeType): ?int
+    {
+        return isset(self::MIME_TO_IMAGE_FORMAT[$mimeType]) ? 20 : 5;
+    }
+
+    /** Bedrock documents no overall Converse request ceiling. */
+    public static function maxRequestBytes(): ?int
+    {
+        return null;
+    }
+
+    public static function supportsFileApi(): bool
+    {
+        return false;
+    }
+
+    /** @throws GenAiUnsupportedOperationException Bedrock has no File API. */
+    public function uploadFile(mixed $fileContent, string $mimeType, string $displayName = ''): string
+    {
+        throw new GenAiUnsupportedOperationException(
+            'Bedrock has no File API. Send the bytes inline with converseWithInlineFile() '
+            .'or ContentBlock::document(), or use a provider where supportsFileApi() is true.'
+        );
     }
 
     /** No-op: Bedrock does not store uploaded files. */
     public function deleteFile(string $fileRef): void {}
 
-    /** @throws \LogicException */
+    /** @throws GenAiUnsupportedOperationException Bedrock has no File API. */
     public function converseWithFileRef(string $fileRef, string $mimeType, string $prompt, ?ToolConfig $toolConfig = null): array
     {
-        throw new \LogicException('Bedrock does not support file references. Use converseWithInlineFile() with base64-encoded bytes.');
+        throw new GenAiUnsupportedOperationException(
+            'Bedrock does not support file references. Use converseWithInlineFile() with base64-encoded bytes.'
+        );
     }
 
     /**
@@ -133,7 +166,11 @@ class BedrockClient implements GenAiClient
             $payload['system'] = [['text' => $system]];
         }
 
-        if ($toolConfig !== null) {
+        // Bedrock has no `none` toolChoice: an omitted toolChoice means *auto*, so
+        // leaving the tool definitions in place would still let the model call one.
+        // Suppressing the whole toolConfig is the only way to express "no tools".
+        // https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolChoice.html
+        if ($toolConfig !== null && $toolConfig->choice->type !== ToolChoice::NONE) {
             $payload['toolConfig'] = $this->toolConfigToBedrock($toolConfig);
         }
 
@@ -167,7 +204,7 @@ class BedrockClient implements GenAiClient
      * Extract tool use blocks from a Bedrock Converse response.
      *
      * @param  array<string, mixed>  $response
-     * @return list<array{name: string, input: array<string, mixed>}>
+     * @return list<array{id: string, name: string, input: array<string, mixed>}>
      */
     public function extractToolCalls(array $response): array
     {
@@ -179,12 +216,58 @@ class BedrockClient implements GenAiClient
                 continue;
             }
             $calls[] = [
+                // Bedrock requires this id back on the toolResult block.
+                'id' => (string) ($block['toolUse']['toolUseId'] ?? ''),
                 'name' => (string) $block['toolUse']['name'],
                 'input' => is_array($block['toolUse']['input']) ? $block['toolUse']['input'] : [],
             ];
         }
 
         return $calls;
+    }
+
+    /**
+     * Replays the assistant turn in Bedrock's own block order, keeping any block
+     * kind this package does not model (reasoningContent and its signature)
+     * verbatim rather than dropping it from the history.
+     *
+     * @param  array<string, mixed>  $response
+     * @return array{role: string, content: list<ContentBlock>}
+     */
+    public function extractAssistantMessage(array $response): array
+    {
+        $content = [];
+
+        foreach ($response['output']['message']['content'] ?? [] as $block) {
+            if (! is_array($block)) {
+                continue;
+            }
+
+            if (isset($block['text']) && is_string($block['text'])) {
+                $rest = $block;
+                unset($rest['text']);
+                $content[] = ContentBlock::text($block['text'], $rest);
+
+                continue;
+            }
+
+            if (isset($block['toolUse']['name'])) {
+                $rest = $block;
+                unset($rest['toolUse']);
+                $content[] = ContentBlock::toolCall(
+                    id: (string) ($block['toolUse']['toolUseId'] ?? ''),
+                    name: (string) $block['toolUse']['name'],
+                    input: is_array($block['toolUse']['input'] ?? null) ? $block['toolUse']['input'] : [],
+                    providerMetadata: $rest,
+                );
+
+                continue;
+            }
+
+            $content[] = ContentBlock::providerRaw($block);
+        }
+
+        return ['role' => 'assistant', 'content' => $content];
     }
 
     public function checkCredentials(): bool
@@ -309,6 +392,8 @@ class BedrockClient implements GenAiClient
     private function convertMessages(array $messages): array
     {
         return array_map(function (array $msg) {
+            $this->assertDocumentCountWithinLimit($msg['content']);
+
             return [
                 'role' => $msg['role'],
                 'content' => array_map(
@@ -319,10 +404,86 @@ class BedrockClient implements GenAiClient
         }, $messages);
     }
 
+    /**
+     * Documents and images are counted against their own separate caps.
+     *
+     * @param  list<ContentBlock>  $content
+     */
+    private function assertDocumentCountWithinLimit(array $content): void
+    {
+        $documents = 0;
+        $images = 0;
+
+        foreach ($content as $block) {
+            if ($block->type !== ContentBlock::TYPE_DOCUMENT) {
+                continue;
+            }
+            if (isset(self::MIME_TO_IMAGE_FORMAT[(string) $block->mimeType])) {
+                $images++;
+            } else {
+                $documents++;
+            }
+        }
+
+        self::assertBlockCount($documents, self::maxInlineBlocksPerMessage('application/pdf'), 'document');
+        self::assertBlockCount($images, self::maxInlineBlocksPerMessage('image/png'), 'image');
+    }
+
+    private static function assertBlockCount(int $actual, ?int $limit, string $kind): void
+    {
+        if ($limit === null || $actual <= $limit) {
+            return;
+        }
+
+        throw new GenAiFatalException(sprintf(
+            'Bedrock Converse accepts at most %d %s blocks per message; this message has %d. '
+            .'Split them across turns or merge them before sending.',
+            $limit,
+            $kind,
+            $actual,
+        ));
+    }
+
     private function contentBlockToBedrock(ContentBlock $block): array
     {
+        if ($block->type === ContentBlock::TYPE_PROVIDER_RAW) {
+            return $block->providerMetadata;
+        }
+
+        if ($block->type === ContentBlock::TYPE_TOOL_CALL) {
+            return $block->providerMetadata + [
+                'toolUse' => [
+                    'toolUseId' => (string) $block->toolCallId,
+                    'name' => (string) $block->toolName,
+                    'input' => ($block->toolInput ?? []) === [] ? (object) [] : $block->toolInput,
+                ],
+            ];
+        }
+
+        if ($block->type === ContentBlock::TYPE_TOOL_RESULT) {
+            $payload = is_array($block->toolResult)
+                ? ['json' => $block->toolResult]
+                : ['text' => $block->toolResultAsText()];
+
+            return [
+                'toolResult' => [
+                    'toolUseId' => (string) $block->toolCallId,
+                    'content' => [$payload],
+                    'status' => $block->isError ? 'error' : 'success',
+                ],
+            ];
+        }
+
+        if ($block->type === ContentBlock::TYPE_FILE_REFERENCE) {
+            throw new GenAiUnsupportedOperationException(
+                'Bedrock has no File API, so ContentBlock::fileReference() cannot be sent to it. '
+                .'Use ContentBlock::document() with base64-encoded bytes instead.'
+            );
+        }
+
         if ($block->type === 'document') {
             $mime = (string) ($block->mimeType ?? '');
+            $this->assertInlineSizeWithinLimit((string) $block->base64, $mime);
 
             if (isset(self::MIME_TO_IMAGE_FORMAT[$mime])) {
                 return [
@@ -342,7 +503,17 @@ class BedrockClient implements GenAiClient
             ];
         }
 
-        return ['text' => $block->text ?? ''];
+        return $block->providerMetadata + ['text' => $block->text ?? ''];
+    }
+
+    private function assertInlineSizeWithinLimit(string $base64, string $mimeType): void
+    {
+        FileLimits::assertWithin(
+            FileLimits::decodedLength($base64),
+            self::maxInlineFileBytes($mimeType),
+            'Bedrock Converse',
+            sprintf('inline %s content', $mimeType === '' ? 'file' : $mimeType),
+        );
     }
 
     private function toolConfigToBedrock(ToolConfig $config): array
@@ -358,16 +529,10 @@ class BedrockClient implements GenAiClient
         $toolChoice = match ($config->choice->type) {
             ToolChoice::ANY => ['any' => (object) []],
             ToolChoice::TOOL => ['tool' => ['name' => $config->choice->toolName]],
-            ToolChoice::NONE => null,
             default => ['auto' => (object) []],
         };
 
-        $result = ['tools' => $tools];
-        if ($toolChoice !== null) {
-            $result['toolChoice'] = $toolChoice;
-        }
-
-        return $result;
+        return ['tools' => $tools, 'toolChoice' => $toolChoice];
     }
 
     /**
