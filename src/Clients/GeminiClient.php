@@ -4,6 +4,7 @@ namespace Bherila\GenAiLaravel\Clients;
 
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
+use Bherila\GenAiLaravel\Contracts\HeartbeatAwareClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
@@ -11,6 +12,7 @@ use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
 use Bherila\GenAiLaravel\FileLimits;
+use Bherila\GenAiLaravel\Http\HasTransportHeartbeat;
 use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
@@ -36,8 +38,10 @@ use Illuminate\Support\Facades\Log;
  *   timeout  — HTTP timeout in seconds (default: 240)
  *   response_mime_type — optional generation response MIME type; null disables MIME forcing
  */
-class GeminiClient implements GenAiClient
+class GeminiClient implements GenAiClient, HeartbeatAwareClient
 {
+    use HasTransportHeartbeat;
+
     private const BASE_URL = 'https://generativelanguage.googleapis.com';
 
     private const FILE_API_URL = self::BASE_URL.'/upload/v1beta/files';
@@ -781,11 +785,12 @@ class GeminiClient implements GenAiClient
         $url = self::BASE_URL."/v1beta/models/{$this->model}:generateContent";
 
         $response = $this->retry->execute(
-            fn () => Http::withHeaders([
+            fn () => $this->heartbeatSend(fn () => $this->heartbeatHttp(Http::withHeaders([
                 'x-goog-api-key' => $this->apiKey,
                 'Content-Type' => 'application/json',
-            ])->withOptions(['timeout' => $this->timeout])->post($url, $payload),
+            ])->withOptions(['timeout' => $this->timeout]))->post($url, $payload)),
             'Gemini generateContent',
+            $this->transportHeartbeat,
         );
 
         return $response->json() ?? [];

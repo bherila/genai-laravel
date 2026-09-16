@@ -3,6 +3,7 @@
 namespace Bherila\GenAiLaravel;
 
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
+use Bherila\GenAiLaravel\Contracts\HeartbeatAwareClient;
 use Bherila\GenAiLaravel\Contracts\QueuedGenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
 use Bherila\GenAiLaravel\Instrumentation\SentryGenAiTracer;
@@ -10,6 +11,7 @@ use Bherila\GenAiLaravel\Mcp\EnqueueOptions;
 use Bherila\GenAiLaravel\Mcp\GenAiRequestPayload;
 use Bherila\GenAiLaravel\Mcp\PendingGenAiRequest;
 use Bherila\GenAiLaravel\Mcp\StoredAttachment;
+use Closure;
 
 /**
  * Fluent builder for provider-agnostic AI requests.
@@ -164,11 +166,26 @@ final class GenAiRequest
 
     /**
      * Execute the request and return a provider-agnostic response.
+     *
+     * The optional heartbeat runs during cURL transfer polling (including idle
+     * response waits), before/after attempts and each second of retry backoff.
+     * Throwing aborts the transport and prevents retries. Built-in providers
+     * use cURL for heartbeat requests; callbacks must return promptly and must
+     * independently fence persistence after generate() returns.
+     *
+     * @param  Closure():void|null  $heartbeat
      */
-    public function generate(): GenAiResponse
+    public function generate(?Closure $heartbeat = null): GenAiResponse
     {
         if (! $this->client instanceof GenAiClient) {
             throw new GenAiUnsupportedOperationException('Queued GenAI clients are asynchronous; call enqueue() and poll the returned request.');
+        }
+        $client = $this->client;
+        if ($heartbeat !== null) {
+            if (! $client instanceof HeartbeatAwareClient) {
+                throw new GenAiUnsupportedOperationException('This client does not support transport heartbeats.');
+            }
+            $client = $client->withTransportHeartbeat($heartbeat);
         }
         $messages = $this->rawMessages ?? $this->buildMessages();
         foreach ($messages as $message) {
@@ -183,7 +200,7 @@ final class GenAiRequest
             inputMessages: $messages,
             system: $this->system,
             toolConfig: $this->toolConfig,
-            callback: fn () => $this->client->converse($this->system, $messages, $this->toolConfig),
+            callback: fn () => $client->converse($this->system, $messages, $this->toolConfig),
         );
 
         return new GenAiResponse(

@@ -4,6 +4,7 @@ namespace Bherila\GenAiLaravel\Clients;
 
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
+use Bherila\GenAiLaravel\Contracts\HeartbeatAwareClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
@@ -11,6 +12,7 @@ use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
 use Bherila\GenAiLaravel\FileLimits;
+use Bherila\GenAiLaravel\Http\HasTransportHeartbeat;
 use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
@@ -37,8 +39,10 @@ use Illuminate\Support\Facades\Log;
  *   max_tokens — maximum output tokens (default: 8192)
  *   timeout    — HTTP timeout in seconds (default: 240)
  */
-class AnthropicClient implements GenAiClient
+class AnthropicClient implements GenAiClient, HeartbeatAwareClient
 {
+    use HasTransportHeartbeat;
+
     private const API_BASE = 'https://api.anthropic.com';
 
     private const API_VERSION = '2023-06-01';
@@ -408,8 +412,9 @@ class AnthropicClient implements GenAiClient
         $http = self::mentionsFileSource($payload['messages']) ? $this->filesHttp : $this->http;
 
         $response = $this->retry->execute(
-            fn () => $http->post(self::API_BASE.'/v1/messages', $payload),
+            fn () => $this->heartbeatSend(fn () => $this->heartbeatHttp($http)->post(self::API_BASE.'/v1/messages', $payload)),
             'Anthropic Messages',
+            $this->transportHeartbeat,
         );
 
         return $response->json() ?? [];

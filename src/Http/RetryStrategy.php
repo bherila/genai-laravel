@@ -58,11 +58,13 @@ class RetryStrategy
      * @param  string  $errorContext  Used in log lines and exception messages
      *                                (e.g. "Anthropic API", "Bedrock list models").
      */
-    public function execute(callable $send, string $errorContext): Response
+    public function execute(callable $send, string $errorContext, ?Closure $heartbeat = null): Response
     {
         $attempt = 0;
         while (true) {
+            $heartbeat?->__invoke();
             $response = $send();
+            $heartbeat?->__invoke();
             if ($response->successful()) {
                 return $response;
             }
@@ -75,7 +77,13 @@ class RetryStrategy
                 $this->throwFor($response, $errorContext);
             }
 
-            $this->sleep($this->delayMsFor($response, $attempt));
+            $delay = $this->delayMsFor($response, $attempt);
+            do {
+                $slice = $heartbeat === null ? $delay : min($delay, 1000);
+                $this->sleep($slice);
+                $delay -= $slice;
+                $heartbeat?->__invoke();
+            } while ($delay > 0);
             $attempt++;
         }
     }
