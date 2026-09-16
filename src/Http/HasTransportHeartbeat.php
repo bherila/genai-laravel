@@ -44,8 +44,7 @@ trait HasTransportHeartbeat
     {
         $http = clone $http;
         if ($this->transportHeartbeat !== null) {
-            $http->setHandler(new CurlHandler);
-            $http->withOptions(['curl' => [CURLOPT_NOPROGRESS => false, CURLOPT_XFERINFOFUNCTION => function (): int {
+            $factory = new HeartbeatCurlFactory(function (): int {
                 try {
                     ($this->transportHeartbeat)();
 
@@ -55,7 +54,8 @@ trait HasTransportHeartbeat
 
                     return 1;
                 }
-            }]]);
+            });
+            $http->setHandler(new CurlHandler(['handle_factory' => $factory]));
         }
 
         return $http;
