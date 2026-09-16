@@ -4,9 +4,11 @@ namespace Bherila\GenAiLaravel\Clients;
 
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
+use Bherila\GenAiLaravel\Contracts\HeartbeatAwareClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiUnsupportedOperationException;
 use Bherila\GenAiLaravel\FileLimits;
+use Bherila\GenAiLaravel\Http\HasTransportHeartbeat;
 use Bherila\GenAiLaravel\Http\RetryStrategy;
 use Bherila\GenAiLaravel\ModelInfo;
 use Bherila\GenAiLaravel\ToolChoice;
@@ -37,8 +39,10 @@ use Illuminate\Support\Facades\Http;
  *   model          — model ID, e.g. "us.anthropic.claude-haiku-4-5-20251001-v1:0"
  *   timeout        — HTTP timeout in seconds (default: 240)
  */
-class BedrockClient implements GenAiClient
+class BedrockClient implements GenAiClient, HeartbeatAwareClient
 {
+    use HasTransportHeartbeat;
+
     /** Hard ceiling on `/inference-profiles` pages — defense in depth. */
     private const MAX_INFERENCE_PROFILE_PAGES = 50;
 
@@ -175,8 +179,9 @@ class BedrockClient implements GenAiClient
         }
 
         $response = $this->retry->execute(
-            fn () => $this->http->post("{$this->endpoint}/model/{$this->modelId}/converse", $payload),
+            fn () => $this->heartbeatSend(fn () => $this->heartbeatHttp($this->http)->post("{$this->endpoint}/model/{$this->modelId}/converse", $payload)),
             'Bedrock Converse',
+            $this->transportHeartbeat,
         );
 
         return $response->json() ?? [];
