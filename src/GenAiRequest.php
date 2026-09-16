@@ -11,6 +11,7 @@ use Bherila\GenAiLaravel\Mcp\EnqueueOptions;
 use Bherila\GenAiLaravel\Mcp\GenAiRequestPayload;
 use Bherila\GenAiLaravel\Mcp\PendingGenAiRequest;
 use Bherila\GenAiLaravel\Mcp\StoredAttachment;
+use Closure;
 
 /**
  * Fluent builder for provider-agnostic AI requests.
@@ -174,7 +175,7 @@ final class GenAiRequest
      *
      * @param  Closure():void|null  $heartbeat
      */
-    public function generate(?\Closure $heartbeat = null): GenAiResponse
+    public function generate(?Closure $heartbeat = null): GenAiResponse
     {
         if (! $this->client instanceof GenAiClient) {
             throw new GenAiUnsupportedOperationException('Queued GenAI clients are asynchronous; call enqueue() and poll the returned request.');

@@ -19,6 +19,7 @@ final class HeartbeatCurlFactory implements CurlFactoryInterface
         $this->factory = new CurlFactory(3);
     }
 
+    /** @param array<string, mixed> $options */
     public function create(RequestInterface $request, array $options): EasyHandle
     {
         $easy = $this->factory->create($request, $options);
