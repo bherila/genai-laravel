@@ -160,6 +160,39 @@ final readonly class McpQueueService
         }
     }
 
+    /**
+     * Every submitted tool call carries an id, so multiple or repeated calls can
+     * be correlated through assistantMessage() and toolResultFor(). An executor's
+     * own id is kept; otherwise the id is derived from the request and the call's
+     * position, which keeps an idempotent replay byte-identical.
+     *
+     * @param  mixed  $calls
+     * @return mixed
+     */
+    private function identifiedToolCalls(string $requestId, $calls)
+    {
+        if (! is_array($calls)) {
+            return $calls;
+        }
+        $seen = [];
+        foreach ($calls as $index => $call) {
+            if (! is_array($call) || ! is_int($index)) {
+                return $calls;
+            }
+            $id = $call['id'] ?? null;
+            if (! is_string($id) || $id === '') {
+                $id = 'genai_'.substr(hash('sha256', $requestId.'|'.$index.'|'.(string) ($call['name'] ?? '')), 0, 24);
+            }
+            if (isset($seen[$id])) {
+                throw new McpQueueException('Tool call ids must be unique within a completion.', 422);
+            }
+            $seen[$id] = true;
+            $calls[$index] = ['id' => $id] + $call;
+        }
+
+        return $calls;
+    }
+
     /** @return array<string, mixed>|null */
     private function attemptClaim(ExecutionContext $context, ?string $queue, ?string $idempotencyKey): ?array
     {
@@ -284,7 +317,7 @@ final readonly class McpQueueService
                 throw new McpQueueException('Executor metadata values must be strings.', 422);
             }
         }
-        $response = ['text' => $response['text'] ?? '', 'tool_calls' => $response['tool_calls'] ?? []];
+        $response = ['text' => $response['text'] ?? '', 'tool_calls' => $this->identifiedToolCalls($requestId, $response['tool_calls'] ?? [])];
         $canonical = $this->canonicalJson(['response' => $response, 'executor' => $executor]);
         $hash = hash('sha256', $canonical);
 

@@ -31,7 +31,7 @@ final class PendingGenAiRequest
 
         return new GenAiResponse(
             text: (string) ($result['text'] ?? ''),
-            toolCalls: array_map(static fn (array $call): array => ['id' => '', 'name' => $call['name'], 'input' => $call['input']], $result['tool_calls'] ?? []),
+            toolCalls: array_map(static fn (array $call): array => ['id' => (string) ($call['id'] ?? ''), 'name' => $call['name'], 'input' => $call['input']], $result['tool_calls'] ?? []),
             usage: Usage::empty(),
             raw: ['provider' => 'mcp', 'executor' => $result['executor'] ?? [], 'receipt_id' => $request->completion_receipt_id],
         );

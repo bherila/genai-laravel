@@ -2,10 +2,12 @@
 
 namespace Bherila\GenAiLaravel\Tests\Feature;
 
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\CompletionDelivery;
 use Bherila\GenAiLaravel\Contracts\MailboxAccessResolver;
 use Bherila\GenAiLaravel\GenAiRequest;
 use Bherila\GenAiLaravel\GenAiServiceProvider;
+use Bherila\GenAiLaravel\Mcp\Exceptions\McpQueueException;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\McpClientFactory;
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
@@ -13,6 +15,10 @@ use Bherila\GenAiLaravel\Mcp\Models\McpClaimReceipt;
 use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
+use Bherila\GenAiLaravel\Schema;
+use Bherila\GenAiLaravel\ToolChoice;
+use Bherila\GenAiLaravel\ToolConfig;
+use Bherila\GenAiLaravel\ToolDefinition;
 use Illuminate\Database\Events\TransactionRolledBack;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -142,6 +148,53 @@ final class McpQueueIntegrityTest extends TestCase
         $this->assertSame($winner['request']['lease_token'], $claim['request']['lease_token']);
         $this->assertSame(1, McpClaimReceipt::query()->where('idempotency_key', 'race:1')->count());
         $this->assertSame(1, McpRequest::query()->firstOrFail()->attempt_count, 'The rolled-back attempt was counted.');
+    }
+
+    public function test_queued_tool_calls_get_stable_unique_ids_that_survive_replay(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->tools(new ToolConfig([new ToolDefinition('ping', 'Ping', Schema::object(['n' => Schema::number()]))], ToolChoice::any()))
+            ->prompt('Ping twice')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context);
+        $submitted = ['tool_calls' => [
+            ['name' => 'ping', 'input' => ['n' => 1]],
+            ['name' => 'ping', 'input' => ['n' => 2]],
+        ]];
+
+        $first = $service->complete($this->context, $pending->id, $claim['request']['lease_token'], $submitted);
+        $calls = $pending->response()?->toolCalls ?? [];
+
+        $this->assertCount(2, $calls);
+        $this->assertNotSame('', $calls[0]['id']);
+        $this->assertNotSame($calls[0]['id'], $calls[1]['id']);
+        // Same submission replays to the same receipt, so ids cannot drift.
+        $this->assertSame($first, $service->complete($this->context, $pending->id, $claim['request']['lease_token'], $submitted));
+        $this->assertSame(array_column($calls, 'id'), array_column($pending->response()?->toolCalls ?? [], 'id'));
+
+        $result = ContentBlock::toolResultFor($calls[1], 'pong');
+        $this->assertSame($calls[1]['id'], $result->toolCallId);
+    }
+
+    public function test_an_executor_keeps_its_own_tool_call_ids_and_duplicates_are_refused(): void
+    {
+        $mailbox = $this->mailbox();
+        $tools = new ToolConfig([new ToolDefinition('ping', 'Ping', Schema::object(['n' => Schema::number()]))], ToolChoice::any());
+        $service = $this->app->make(McpQueueService::class);
+
+        $kept = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->tools($tools)->prompt('One')->enqueue();
+        $claim = $service->claim($this->context);
+        $service->complete($this->context, $kept->id, $claim['request']['lease_token'], ['tool_calls' => [['id' => 'toolu_executor_1', 'name' => 'ping', 'input' => ['n' => 1]]]]);
+        $this->assertSame('toolu_executor_1', ($kept->response()?->toolCalls ?? [])[0]['id']);
+
+        $dupe = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->tools($tools)->prompt('Two')->enqueue();
+        $claim = $service->claim($this->context);
+        $this->expectException(McpQueueException::class);
+        $service->complete($this->context, $dupe->id, $claim['request']['lease_token'], ['tool_calls' => [
+            ['id' => 'same', 'name' => 'ping', 'input' => ['n' => 1]],
+            ['id' => 'same', 'name' => 'ping', 'input' => ['n' => 2]],
+        ]]);
     }
 
     private function completedDelivery(): McpDelivery
