@@ -671,6 +671,13 @@ package does not issue OAuth credentials. Prefer registering
 one OAuth connection and one tool catalog. Put middleware needed to establish
 the host principal in `genai.mcp.server.middleware` and
 `genai.mcp.rest.middleware`; the package authentication resolver runs after it.
+Ahead of that middleware, both stacks apply a per-IP limit
+(`GENAI_MCP_PREAUTH_REQUESTS_PER_MINUTE`, default 300), so an invalid-token flood
+never reaches token lookup. The REST stack also refuses bodies over
+`GENAI_MCP_REST_MAX_BODY_BYTES` (default: twice `GENAI_MCP_MAX_COMPLETION_BYTES` plus 64 KiB) before decoding them.
+The per-principal `GENAI_MCP_REQUESTS_PER_MINUTE` limit still applies after
+authentication. Behind a proxy, configure trusted proxies so the client IP is
+the real one.
 `GenAiMcpToolCatalog::requiredScope()` maps the status tool to `genai:read` and
 all claim/mutation tools to `genai:work` for host catalog filtering.
 

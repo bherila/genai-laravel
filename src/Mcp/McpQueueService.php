@@ -243,6 +243,9 @@ final readonly class McpQueueService
      */
     public function complete(ExecutionContext $context, string $requestId, string $leaseToken, array $response, array $executor = []): array
     {
+        // Refuse a principal without work access before validating or hashing
+        // its payload; the locked check in the transaction stays authoritative.
+        $this->findAuthorized($context, $requestId, 'genai:work');
         if (array_diff(array_keys($response), ['text', 'tool_calls']) !== []) {
             throw new McpQueueException('Unknown response fields are not allowed.', 422);
         }

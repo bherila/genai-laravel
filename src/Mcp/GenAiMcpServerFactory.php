@@ -30,7 +30,13 @@ final readonly class GenAiMcpServerFactory
             ->setInstructions($this->catalog->instructions())->setPaginationLimit(25)
             ->setSession(new Psr16SessionStore($this->cache, CredentialSessionNamespace::prefix($request, 'genai_mcp_'), (int) config('genai.mcp.server.session_ttl_seconds', 1800)))
             ->setLogger($logger)->setContainer(app())->setRegistry(new Registry(logger: $logger))->setReferenceHandler(new ReferenceHandler(app()))->setLazyLoading(false);
+        // Register only what this principal may call, so a tool it lacks the
+        // scope for is unknown rather than argument-validated and then refused.
+        $context = $request->attributes->get(ExecutionContext::class);
         foreach ($this->catalog->definitions($this->tools) as $definition) {
+            if (! $context instanceof ExecutionContext || ! $context->can($this->catalog->requiredScope($definition))) {
+                continue;
+            }
             $builder->addTool(
                 handler: $definition->handler, name: $definition->name, title: $definition->title,
                 description: $definition->description,

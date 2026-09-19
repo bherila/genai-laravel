@@ -16,8 +16,12 @@ use Bherila\GenAiLaravel\Mcp\Commands\PruneMcpRequests;
 use Bherila\GenAiLaravel\Mcp\Delivery\RejectingCompletionDelivery;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\Http\McpNoStore;
+use Bherila\GenAiLaravel\Mcp\Http\McpPreAuthGuard;
 use Bherila\McpLaravelBridge\Http\McpHttpPolicy;
 use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Contracts\Http\Kernel as HttpKernelContract;
+use Illuminate\Foundation\Http\Kernel as HttpKernel;
+use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
@@ -79,11 +83,36 @@ class GenAiServiceProvider extends ServiceProvider
         });
         $this->app['router']->aliasMiddleware('genai.mcp.auth', McpAuthenticate::class);
         $this->app['router']->aliasMiddleware('genai.mcp.no_store', McpNoStore::class);
+        if ((bool) config('genai.mcp.enabled', false)) {
+            $this->registerPreAuthGuard();
+        }
         if ((bool) config('genai.mcp.enabled', false) && (bool) config('genai.mcp.rest.enabled', true)) {
             $this->loadRoutesFrom(__DIR__.'/../routes/mcp.php');
         }
         if ((bool) config('genai.mcp.enabled', false) && (bool) config('genai.mcp.server.enabled', false)) {
             $this->loadRoutesFrom(__DIR__.'/../routes/mcp-server.php');
         }
+    }
+
+    /** Global, directly after TrustProxies so `$request->ip()` is the real client (see McpPreAuthGuard). */
+    private function registerPreAuthGuard(): void
+    {
+        $kernel = $this->app->make(HttpKernelContract::class);
+        // Always true under Testbench, which is what PHPStan resolves; a host may bind its own kernel.
+        if (! $kernel instanceof HttpKernel) { // @phpstan-ignore instanceof.alwaysTrue
+            return;
+        }
+        $middleware = $kernel->getGlobalMiddleware();
+        if (in_array(McpPreAuthGuard::class, $middleware, true)) {
+            return;
+        }
+        $position = 0;
+        foreach (array_values($middleware) as $index => $class) {
+            if (is_a($class, TrustProxies::class, true)) {
+                $position = $index + 1;
+            }
+        }
+        array_splice($middleware, $position, 0, [McpPreAuthGuard::class]);
+        $kernel->setGlobalMiddleware($middleware);
     }
 }
