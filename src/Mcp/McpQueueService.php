@@ -17,13 +17,17 @@ use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
 use Illuminate\Database\DatabaseManager;
+use Illuminate\Database\DetectsConcurrencyErrors;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
+use Throwable;
 
 final readonly class McpQueueService
 {
+    use DetectsConcurrencyErrors;
+
     public function __construct(
         private DatabaseManager $db,
         private MailboxAccessResolver $access,
@@ -102,10 +106,10 @@ final readonly class McpQueueService
 
                 return $request->fresh(['attachments']);
             });
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             try {
                 $rolledBack = ! McpRequest::query()->whereKey($requestId)->exists();
-            } catch (\Throwable) {
+            } catch (Throwable) {
                 // If database state cannot be established, preserving bytes is safer than
                 // deleting attachments that may already belong to a committed request.
                 $rolledBack = false;
@@ -154,6 +158,13 @@ final readonly class McpQueueService
                 return $this->attemptClaim($context, $queue, $idempotencyKey);
             } catch (UniqueConstraintViolationException $e) {
                 if ($idempotencyKey === null || $attempt > 0) {
+                    throw $e;
+                }
+            } catch (Throwable $e) {
+                // MySQL can pick either racer as the deadlock victim instead of
+                // failing the insert, and Laravel reports that as a DeadlockException
+                // rather than a query exception, so match on the cause.
+                if ($idempotencyKey === null || $attempt > 0 || ! $this->causedByConcurrencyError($e)) {
                     throw $e;
                 }
             }
@@ -660,7 +671,14 @@ final readonly class McpQueueService
     /** @return array<string, mixed> */
     private function receipt(McpRequest $request): array
     {
-        return ['request_id' => $request->id, 'status' => 'completed', 'receipt_id' => $request->completion_receipt_id, 'result' => $request->result];
+        $result = $request->result;
+        // A result stored before tool-call ids existed still has to satisfy the
+        // receipt schema that now requires them.
+        if (is_array($result) && ($result['tool_calls'] ?? []) !== []) {
+            $result['tool_calls'] = $this->identifiedToolCalls($request->id, $result['tool_calls']);
+        }
+
+        return ['request_id' => $request->id, 'status' => 'completed', 'receipt_id' => $request->completion_receipt_id, 'result' => $result];
     }
 
     /**

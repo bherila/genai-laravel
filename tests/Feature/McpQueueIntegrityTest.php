@@ -295,6 +295,8 @@ final class McpQueueIntegrityTest extends TestCase
 
         $replay = $service->complete($this->context, $pending->id, $claim['request']['lease_token'], $payload);
         $this->assertSame($receipt['receipt_id'], $replay['receipt_id']);
+        // The replayed receipt must still satisfy the schema that requires ids.
+        $this->assertNotSame('', $replay['result']['tool_calls'][0]['id'] ?? '');
     }
 
     public function test_the_mcp_completion_receipt_schema_declares_tool_call_ids(): void
