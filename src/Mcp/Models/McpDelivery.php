@@ -13,6 +13,8 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $acknowledged_at
  * @property Carbon|null $leased_until
  * @property string|null $lease_owner
+ * @property int $attempt_count
+ * @property string|null $last_error
  */
 final class McpDelivery extends Model
 {

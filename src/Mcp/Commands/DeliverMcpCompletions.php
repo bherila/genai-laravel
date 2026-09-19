@@ -28,7 +28,12 @@ final class DeliverMcpCompletions extends Command
                 if ($row === null) {
                     return null;
                 }
-                $row->forceFill(['lease_owner' => $owner, 'leased_until' => now()->addMinutes(5)])->save();
+                // Counted at lease time: a slow worker whose lease was taken over
+                // must not increment the attempt of whoever holds it now.
+                $row->forceFill([
+                    'lease_owner' => $owner, 'leased_until' => now()->addMinutes(5),
+                    'attempt_count' => $row->attempt_count + 1,
+                ])->save();
 
                 return $row;
             });
@@ -36,20 +41,32 @@ final class DeliverMcpCompletions extends Command
                 break;
             }
             try {
-                $row->increment('attempt_count');
-                if ($delivery->deliver($row)) {
-                    $row->forceFill(['acknowledged_at' => now(), 'last_error' => null, 'lease_owner' => null, 'leased_until' => null])->save();
-                } else {
-                    $row->forceFill(['lease_owner' => null, 'leased_until' => null, 'available_at' => now()->addMinute()])->save();
-                }
+                $applied = $delivery->deliver($row)
+                    ? $this->owned($row, $owner, ['acknowledged_at' => now(), 'last_error' => null, 'lease_owner' => null, 'leased_until' => null])
+                    : $this->owned($row, $owner, ['lease_owner' => null, 'leased_until' => null, 'available_at' => now()->addMinute()]);
             } catch (Throwable $e) {
-                $row->forceFill(['last_error' => mb_substr($e->getMessage(), 0, 1000), 'available_at' => now()->addMinutes(5), 'lease_owner' => null, 'leased_until' => null])->save();
+                $applied = $this->owned($row, $owner, ['last_error' => mb_substr($e->getMessage(), 0, 1000), 'available_at' => now()->addMinutes(5), 'lease_owner' => null, 'leased_until' => null]);
                 report($e);
+            }
+            if (! $applied) {
+                $this->warn("Delivery {$row->id} was taken over during handling; its newer lease was left untouched.");
             }
             $processed++;
         }
         $this->info("Processed {$processed} delivery record(s).");
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Apply an outcome only while this invocation still owns the lease. A
+     * handler that outlives its lease would otherwise clear or reschedule the
+     * lease of the worker that has since taken the record over.
+     *
+     * @param  array<string, mixed>  $values
+     */
+    private function owned(McpDelivery $row, string $owner, array $values): bool
+    {
+        return McpDelivery::query()->whereKey($row->id)->where('lease_owner', $owner)->update($values) === 1;
     }
 }
