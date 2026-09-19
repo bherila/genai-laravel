@@ -150,6 +150,27 @@ final class McpHttpHardeningTest extends TestCase
         $this->assertLessThan(array_search(TrimStrings::class, $order, true), $guard);
     }
 
+    public function test_an_undeclared_oversized_body_is_read_only_one_byte_past_the_cap(): void
+    {
+        config(['genai.mcp.rest.max_body_bytes' => 1024]);
+        stream_wrapper_register('genai-counting', CountingBodyStream::class);
+
+        try {
+            CountingBodyStream::$size = 1024 * 1024;
+            CountingBodyStream::$read = 0;
+            $request = Request::create('/genai/mcp/v1/claims', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], fopen('genai-counting://body', 'r'));
+            $request->headers->remove('Content-Length');
+
+            $response = $this->app->make(McpPreAuthGuard::class)->handle($request, fn () => response('reached'));
+
+            $this->assertSame(413, $response->getStatusCode());
+            // PHP streams read in 8 KiB chunks, so the bound is a chunk past the cap, not the whole body.
+            $this->assertLessThanOrEqual(1025 + 8192, CountingBodyStream::$read);
+        } finally {
+            stream_wrapper_unregister('genai-counting');
+        }
+    }
+
     public function test_the_preauth_limit_keys_on_the_client_behind_a_trusted_proxy(): void
     {
         config(['genai.mcp.rest.preauth_requests_per_minute' => 1]);
@@ -186,6 +207,58 @@ final class McpHttpHardeningTest extends TestCase
     private function mailbox(): McpMailbox
     {
         return McpMailbox::query()->create(['owner_type' => 'user', 'owner_id' => '1', 'name' => 'default', 'enabled' => true]);
+    }
+}
+
+/** A request body of $size bytes that records how many were actually read. */
+final class CountingBodyStream
+{
+    public static int $size = 0;
+
+    public static int $read = 0;
+
+    /** @var resource|null */
+    public $context;
+
+    private int $position = 0;
+
+    public function stream_open(string $path, string $mode, int $options, ?string &$openedPath): bool
+    {
+        $this->position = 0;
+
+        return true;
+    }
+
+    public function stream_read(int $count): string
+    {
+        $chunk = max(0, min($count, self::$size - $this->position));
+        $this->position += $chunk;
+        self::$read = max(self::$read, $this->position);
+
+        return str_repeat('x', $chunk);
+    }
+
+    public function stream_eof(): bool
+    {
+        return $this->position >= self::$size;
+    }
+
+    public function stream_seek(int $offset, int $whence): bool
+    {
+        $this->position = $offset;
+
+        return true;
+    }
+
+    public function stream_tell(): int
+    {
+        return $this->position;
+    }
+
+    /** @return array<string, int> */
+    public function stream_stat(): array
+    {
+        return ['size' => self::$size];
     }
 }
 

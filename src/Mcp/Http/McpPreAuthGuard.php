@@ -66,11 +66,22 @@ final readonly class McpPreAuthGuard
         return null;
     }
 
+    /**
+     * A declared length over the cap is refused unread. Otherwise read at most
+     * one byte past the cap: a chunked or understated body must not be
+     * buffered whole to find out it is too large. php://input can be re-read,
+     * so the application still sees the full body.
+     */
     private function exceeds(Request $request, int $limit): bool
     {
         $declared = $request->headers->get('Content-Length');
+        if (is_string($declared) && ctype_digit($declared) && (int) $declared > $limit) {
+            return true;
+        }
+        $stream = $request->getContent(true);
+        $read = stream_get_contents($stream, $limit + 1);
+        rewind($stream);
 
-        return (is_string($declared) && ctype_digit($declared) && (int) $declared > $limit)
-            || strlen((string) $request->getContent()) > $limit;
+        return is_string($read) && strlen($read) > $limit;
     }
 }
