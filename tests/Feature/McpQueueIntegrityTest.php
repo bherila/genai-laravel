@@ -9,6 +9,7 @@ use Bherila\GenAiLaravel\GenAiServiceProvider;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\McpClientFactory;
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
+use Bherila\GenAiLaravel\Mcp\Models\McpClaimReceipt;
 use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
@@ -84,6 +85,26 @@ final class McpQueueIntegrityTest extends TestCase
         $this->assertNotNull($delivery->acknowledged_at);
         $this->assertNull($delivery->lease_owner);
         $this->assertSame(1, $delivery->attempt_count);
+    }
+
+    public function test_renewing_a_lease_extends_the_claim_receipt_so_the_key_still_replays(): void
+    {
+        $mailbox = $this->mailbox();
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->prompt('Hi')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context, idempotencyKey: 'runner:1');
+        $receiptExpiry = McpClaimReceipt::query()->where('idempotency_key', 'runner:1')->firstOrFail()->expires_at;
+
+        // Past the original lease, inside the renewed one: a restarted runner replays its key.
+        $this->travel(10)->minutes();
+        $renewed = $service->renew($this->context, $claim['request']['id'], $claim['request']['lease_token']);
+        $this->assertTrue(McpClaimReceipt::query()->where('idempotency_key', 'runner:1')->firstOrFail()->expires_at->greaterThan($receiptExpiry));
+
+        $this->travel(6)->minutes();
+        $replay = $service->claim($this->context, idempotencyKey: 'runner:1');
+        $this->assertSame($claim['request']['id'], $replay['request']['id']);
+        $this->assertSame($claim['request']['lease_token'], $replay['request']['lease_token']);
+        $this->assertSame($renewed['request']['lease_expires_at'], $replay['request']['lease_expires_at']);
     }
 
     private function completedDelivery(): McpDelivery

@@ -231,6 +231,14 @@ final readonly class McpQueueService
             }
             $request->lease_expires_at = $next;
             $request->save();
+            // The claim receipt derives this lease's token, so a runner that
+            // restarts mid-lease can only replay its idempotency key while the
+            // receipt outlives the lease it renewed.
+            McpClaimReceipt::query()
+                ->where('request_id', $request->id)
+                ->where('principal_key', $context->principalKey)
+                ->where('expires_at', '<', $next)
+                ->update(['expires_at' => $next]);
 
             return $this->envelope($request->load('attachments'), $leaseToken);
         });
