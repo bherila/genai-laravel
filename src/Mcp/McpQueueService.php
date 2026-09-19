@@ -161,6 +161,34 @@ final readonly class McpQueueService
     }
 
     /**
+     * The envelope for a live receipt under this key, or null when there is
+     * none to replay. `$discardStale` deletes a receipt that can no longer be
+     * replayed, which is only correct before this call claims for itself.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function replayReceipt(ExecutionContext $context, ?string $queue, string $idempotencyKey, bool $discardStale = false): ?array
+    {
+        $receipt = McpClaimReceipt::query()->where('principal_key', $context->principalKey)
+            ->where('idempotency_key', $idempotencyKey)->lockForUpdate()->first();
+        if ($receipt !== null && $receipt->expires_at->isFuture()) {
+            if ($receipt->queue_filter !== $queue) {
+                throw new McpQueueException('Claim idempotency key was already used with a different queue filter.', 409);
+            }
+            $request = McpRequest::query()->with(['attachments', 'mailbox'])->find($receipt->request_id);
+            if ($request?->status === McpRequestStatus::Leased && $request->lease_expires_at?->isFuture()
+                && $this->access->authorize($context, $request->mailbox, 'genai:work', $request)) {
+                return $this->envelope($request, $this->leaseTokens->forReceipt($receipt));
+            }
+        }
+        if ($discardStale) {
+            $receipt?->delete();
+        }
+
+        return null;
+    }
+
+    /**
      * Every submitted tool call carries an id, so multiple or repeated calls can
      * be correlated through assistantMessage() and toolResultFor(). An executor's
      * own id is kept; otherwise the id is derived from the request and the call's
@@ -179,8 +207,14 @@ final readonly class McpQueueService
             if (! is_array($call) || ! is_int($index)) {
                 return $calls;
             }
-            $id = $call['id'] ?? null;
-            if (! is_string($id) || $id === '') {
+            if (array_key_exists('id', $call)) {
+                // A supplied id is left exactly as sent, so a malformed one
+                // fails the advertised schema instead of being replaced.
+                $id = $call['id'];
+                if (! is_string($id) || $id === '') {
+                    continue;
+                }
+            } else {
                 $id = 'genai_'.substr(hash('sha256', $requestId.'|'.$index.'|'.(string) ($call['name'] ?? '')), 0, 24);
             }
             if (isset($seen[$id])) {
@@ -200,19 +234,10 @@ final readonly class McpQueueService
             $this->expireRequests($context, $queue);
             $this->failExhaustedLeases($context, $queue);
             if ($idempotencyKey !== null) {
-                $receipt = McpClaimReceipt::query()->where('principal_key', $context->principalKey)
-                    ->where('idempotency_key', $idempotencyKey)->lockForUpdate()->first();
-                if ($receipt !== null && $receipt->expires_at->isFuture()) {
-                    if ($receipt->queue_filter !== $queue) {
-                        throw new McpQueueException('Claim idempotency key was already used with a different queue filter.', 409);
-                    }
-                    $request = McpRequest::query()->with(['attachments', 'mailbox'])->find($receipt->request_id);
-                    if ($request?->status === McpRequestStatus::Leased && $request->lease_expires_at?->isFuture()
-                        && $this->access->authorize($context, $request->mailbox, 'genai:work', $request)) {
-                        return $this->envelope($request, $this->leaseTokens->forReceipt($receipt));
-                    }
+                $replay = $this->replayReceipt($context, $queue, $idempotencyKey, true);
+                if ($replay !== null) {
+                    return $replay;
                 }
-                $receipt?->delete();
             }
 
             $request = null;
@@ -233,7 +258,10 @@ final readonly class McpQueueService
                 }
             }
             if ($request === null) {
-                return null;
+                // A concurrent first use of the same key may have taken the only
+                // eligible request while this call waited on its row lock, so the
+                // race ends in no candidate rather than a unique violation.
+                return $idempotencyKey === null ? null : $this->replayReceipt($context, $queue, $idempotencyKey);
             }
 
             $receipt = null;

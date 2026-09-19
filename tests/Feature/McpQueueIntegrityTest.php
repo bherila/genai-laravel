@@ -9,6 +9,7 @@ use Bherila\GenAiLaravel\GenAiRequest;
 use Bherila\GenAiLaravel\GenAiServiceProvider;
 use Bherila\GenAiLaravel\Mcp\Exceptions\McpQueueException;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
+use Bherila\GenAiLaravel\Mcp\LeaseTokenFactory;
 use Bherila\GenAiLaravel\Mcp\McpClientFactory;
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
 use Bherila\GenAiLaravel\Mcp\Models\McpClaimReceipt;
@@ -19,12 +20,14 @@ use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\Events\TransactionRolledBack;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Orchestra\Testbench\TestCase;
 use PDOException;
 
@@ -215,6 +218,55 @@ final class McpQueueIntegrityTest extends TestCase
             ['id' => 'same', 'name' => 'ping', 'input' => ['n' => 1]],
             ['id' => 'same', 'name' => 'ping', 'input' => ['n' => 2]],
         ]]);
+    }
+
+    public function test_a_lost_race_that_leaves_no_candidate_still_replays_the_winner(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->prompt('Only one')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        // Another principal holds the only request, so this call finds no candidate.
+        $service->claim(new ExecutionContext('other-principal', [$mailbox->id], ['genai:work']));
+
+        // The competing first use of our key commits after our candidate query
+        // and before the recheck: the state a lost race actually leaves behind.
+        $mailboxId = $mailbox->id;
+        Event::listen(QueryExecuted::class, function (QueryExecuted $query) use ($pending, $mailboxId): void {
+            // The candidate select specifically, not the earlier sweeps.
+            if (ClaimRaceState::$collided || ! str_contains($query->sql, 'order by "priority" desc')) {
+                return;
+            }
+            ClaimRaceState::$collided = true;
+            McpClaimReceipt::query()->create([
+                'id' => (string) Str::uuid(), 'request_id' => $pending->id, 'mailbox_id' => $mailboxId,
+                'principal_key' => 'test-principal', 'idempotency_key' => 'sole:1', 'queue_filter' => null,
+                'expires_at' => now()->addMinutes(10),
+            ]);
+        });
+
+        $claim = $service->claim($this->context, idempotencyKey: 'sole:1');
+
+        $this->assertTrue(ClaimRaceState::$collided, 'The race was never exercised.');
+        $this->assertNotNull($claim, 'The loser returned null instead of replaying the winning receipt.');
+        $this->assertSame($pending->id, $claim['request']['id']);
+        $winning = McpClaimReceipt::query()->where('idempotency_key', 'sole:1')->firstOrFail();
+        $this->assertSame($this->app->make(LeaseTokenFactory::class)->forReceipt($winning), $claim['request']['lease_token']);
+    }
+
+    public function test_a_malformed_supplied_tool_call_id_is_rejected_not_replaced(): void
+    {
+        $mailbox = $this->mailbox();
+        $tools = new ToolConfig([new ToolDefinition('ping', 'Ping', Schema::object(['n' => Schema::number()]))], ToolChoice::any());
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->tools($tools)->prompt('One')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context);
+
+        try {
+            $service->complete($this->context, $pending->id, $claim['request']['lease_token'], ['tool_calls' => [['id' => '', 'name' => 'ping', 'input' => ['n' => 1]]]]);
+            $this->fail('An empty tool call id was accepted.');
+        } catch (McpQueueException $e) {
+            $this->assertSame(422, $e->httpStatus);
+        }
     }
 
     private function completedDelivery(): McpDelivery
