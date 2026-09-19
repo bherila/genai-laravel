@@ -108,6 +108,46 @@ final class McpHttpHardeningTest extends TestCase
         $this->assertSame(McpRequestStatus::Leased, $pending->status());
     }
 
+    public function test_read_only_principals_are_refused_before_rest_mutations_parse_their_bodies(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->prompt('Hi')->enqueue();
+        $this->app->make(McpQueueService::class)->claim(new ExecutionContext('worker', [$mailbox->id], ['genai:work']));
+        $this->resolver->context = new ExecutionContext('reader', [$mailbox->id], ['genai:read']);
+
+        // Every mutation, each with a body its own validation would answer 422.
+        foreach (['lease', 'complete', 'fail'] as $action) {
+            $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/'.$action, ['unexpected' => true])
+                ->assertStatus(403);
+        }
+        $this->assertSame(McpRequestStatus::Leased, $pending->status());
+    }
+
+    public function test_read_only_principals_see_and_reach_only_read_tools_over_mcp(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->prompt('Hi')->enqueue();
+        $this->app->make(McpQueueService::class)->claim(new ExecutionContext('worker', [$mailbox->id], ['genai:work']));
+        $this->resolver->context = new ExecutionContext('reader', [$mailbox->id], ['genai:read']);
+        $headers = ['Accept' => 'application/json, text/event-stream', 'Authorization' => 'Bearer test-token'];
+        $initialize = $this->postJson('/genai/mcp', [
+            'jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize',
+            'params' => ['protocolVersion' => '2025-03-26', 'capabilities' => [], 'clientInfo' => ['name' => 'test', 'version' => '1']],
+        ], $headers)->assertOk();
+        $headers['Mcp-Session-Id'] = (string) $initialize->headers->get('Mcp-Session-Id');
+        $headers['Mcp-Protocol-Version'] = '2025-03-26';
+
+        $tools = $this->postJson('/genai/mcp', ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'tools/list'], $headers)->assertOk();
+        $this->assertSame(['genai_queue_status'], array_column($tools->json('result.tools'), 'name'));
+
+        $call = $this->postJson('/genai/mcp', ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'tools/call', 'params' => [
+            'name' => 'complete_genai_request', 'arguments' => ['request_id' => 'not-a-uuid'],
+        ]], $headers);
+        $this->assertStringNotContainsStringIgnoringCase('request_id', (string) $call->getContent());
+        $this->assertNull($call->json('result.structuredContent'));
+        $this->assertSame(McpRequestStatus::Leased, $pending->status());
+    }
+
     public function test_invalid_token_floods_are_limited_before_token_lookup_on_both_stacks(): void
     {
         config(['genai.mcp.rest.preauth_requests_per_minute' => 2, 'genai.mcp.rest.requests_per_minute' => 100]);

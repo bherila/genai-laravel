@@ -39,6 +39,7 @@ final readonly class McpApiController
     public function renew(Request $request, string $requestId): JsonResponse
     {
         return $this->respond(function () use ($request, $requestId): array {
+            $this->authorizeWork($request, $requestId);
             $this->assertKeys($request, ['lease_token']);
             $leaseToken = $request->input('lease_token');
             if (! is_string($leaseToken)) {
@@ -52,6 +53,7 @@ final readonly class McpApiController
     public function complete(Request $request, string $requestId): JsonResponse
     {
         return $this->respond(function () use ($request, $requestId): array {
+            $this->authorizeWork($request, $requestId);
             $this->assertKeys($request, ['lease_token', 'response', 'executor']);
             $wire = Json::decodeObject($request->getContent());
             $response = $this->objectValue($wire['response'] ?? null);
@@ -75,6 +77,7 @@ final readonly class McpApiController
     public function fail(Request $request, string $requestId): JsonResponse
     {
         return $this->respond(function () use ($request, $requestId): array {
+            $this->authorizeWork($request, $requestId);
             $this->assertKeys($request, ['lease_token', 'error', 'retryable']);
             if (! is_array($request->input('error')) || ! is_bool($request->input('retryable'))) {
                 throw new McpQueueException('error must be an object and retryable must be a boolean.', 422);
@@ -90,6 +93,12 @@ final readonly class McpApiController
                 (bool) $request->boolean('retryable'),
             );
         });
+    }
+
+    /** Refuse a principal without work access before its body is decoded or validated. */
+    private function authorizeWork(Request $request, string $requestId): void
+    {
+        $this->queue->findAuthorized($this->context($request), $requestId, 'genai:work');
     }
 
     private function context(Request $request): ExecutionContext
