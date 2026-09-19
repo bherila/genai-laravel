@@ -16,6 +16,7 @@ use Bherila\GenAiLaravel\Mcp\Commands\PruneMcpRequests;
 use Bherila\GenAiLaravel\Mcp\Delivery\RejectingCompletionDelivery;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\Http\McpNoStore;
+use Bherila\GenAiLaravel\Mcp\Http\McpRequestBodyLimit;
 use Bherila\McpLaravelBridge\Http\McpHttpPolicy;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
@@ -77,8 +78,14 @@ class GenAiServiceProvider extends ServiceProvider
             return Limit::perMinute((int) config('genai.mcp.rest.requests_per_minute', 60))
                 ->by('genai-mcp:'.hash('sha256', $identity));
         });
+        // Runs before bearer-token lookup, so an invalid-token flood is refused
+        // without touching the token table. Keyed by client IP only: a token
+        // fingerprint would let an attacker reset the limit by rotating tokens.
+        RateLimiter::for('genai-mcp-preauth', fn (Request $request): Limit => Limit::perMinute((int) config('genai.mcp.rest.preauth_requests_per_minute', 300))
+            ->by('genai-mcp-preauth:'.hash('sha256', (string) $request->ip())));
         $this->app['router']->aliasMiddleware('genai.mcp.auth', McpAuthenticate::class);
         $this->app['router']->aliasMiddleware('genai.mcp.no_store', McpNoStore::class);
+        $this->app['router']->aliasMiddleware('genai.mcp.body_limit', McpRequestBodyLimit::class);
         if ((bool) config('genai.mcp.enabled', false) && (bool) config('genai.mcp.rest.enabled', true)) {
             $this->loadRoutesFrom(__DIR__.'/../routes/mcp.php');
         }

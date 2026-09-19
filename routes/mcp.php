@@ -6,7 +6,7 @@ use Illuminate\Support\Facades\Route;
 
 $prefix = trim((string) config('genai.mcp.rest.prefix', 'genai/mcp/v1'), '/');
 $hostMiddleware = array_values(config('genai.mcp.rest.middleware', []));
-Route::prefix($prefix)->middleware(['genai.mcp.no_store', ...$hostMiddleware, 'genai.mcp.auth', 'throttle:genai-mcp'])->group(function (): void {
+Route::prefix($prefix)->middleware(['genai.mcp.no_store', 'throttle:genai-mcp-preauth', 'genai.mcp.body_limit', ...$hostMiddleware, 'genai.mcp.auth', 'throttle:genai-mcp'])->group(function (): void {
     Route::get('/queue/status', [McpApiController::class, 'status']);
     Route::post('/claims', [McpApiController::class, 'claim']);
     Route::get('/requests/{requestId}', [McpApiController::class, 'show']);
