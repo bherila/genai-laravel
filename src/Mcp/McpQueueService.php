@@ -350,14 +350,18 @@ final readonly class McpQueueService
                 throw new McpQueueException('Executor metadata values must be strings.', 422);
             }
         }
-        $response = ['text' => $response['text'] ?? '', 'tool_calls' => $this->identifiedToolCalls($requestId, $response['tool_calls'] ?? [])];
-        $canonical = $this->canonicalJson(['response' => $response, 'executor' => $executor]);
-        $hash = hash('sha256', $canonical);
+        $submitted = ['text' => $response['text'] ?? '', 'tool_calls' => $response['tool_calls'] ?? []];
+        $response = ['text' => $submitted['text'], 'tool_calls' => $this->identifiedToolCalls($requestId, $submitted['tool_calls'])];
+        $hash = hash('sha256', $this->canonicalJson(['response' => $response, 'executor' => $executor]));
+        // A completion committed before tool-call ids existed was hashed without
+        // them, so its replay must still match rather than answer 409.
+        $legacyHash = hash('sha256', $this->canonicalJson(['response' => $submitted, 'executor' => $executor]));
 
-        return $this->db->connection()->transaction(function () use ($context, $requestId, $leaseToken, $response, $executor, $hash): array {
+        return $this->db->connection()->transaction(function () use ($context, $requestId, $leaseToken, $response, $executor, $hash, $legacyHash): array {
             $request = $this->authorizedRequest($context, $requestId, 'genai:work', true);
             if ($request->status === McpRequestStatus::Completed) {
-                if (hash_equals((string) $request->completion_hash, $hash)
+                $stored = (string) $request->completion_hash;
+                if ((hash_equals($stored, $hash) || hash_equals($stored, $legacyHash))
                     && hash_equals((string) $request->completion_lease_hash, hash('sha256', $leaseToken))
                     && $request->completion_principal === $context->principalKey) {
                     return $this->receipt($request);

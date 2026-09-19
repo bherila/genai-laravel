@@ -9,6 +9,7 @@ use Bherila\GenAiLaravel\GenAiRequest;
 use Bherila\GenAiLaravel\GenAiServiceProvider;
 use Bherila\GenAiLaravel\Mcp\Exceptions\McpQueueException;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
+use Bherila\GenAiLaravel\Mcp\GenAiMcpToolCatalog;
 use Bherila\GenAiLaravel\Mcp\LeaseTokenFactory;
 use Bherila\GenAiLaravel\Mcp\McpClientFactory;
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
@@ -267,6 +268,43 @@ final class McpQueueIntegrityTest extends TestCase
         } catch (McpQueueException $e) {
             $this->assertSame(422, $e->httpStatus);
         }
+    }
+
+    public function test_a_completion_stored_before_ids_existed_still_replays(): void
+    {
+        $mailbox = $this->mailbox();
+        $tools = new ToolConfig([new ToolDefinition('ping', 'Ping', Schema::object(['n' => Schema::number()]))], ToolChoice::any());
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->tools($tools)->prompt('One')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context);
+        $payload = ['tool_calls' => [['name' => 'ping', 'input' => ['n' => 1]]]];
+        $receipt = $service->complete($this->context, $pending->id, $claim['request']['lease_token'], $payload);
+
+        // Rewrite the stored state the way a pre-upgrade completion left it:
+        // hashed and stored without ids.
+        $request = McpRequest::query()->findOrFail($pending->id);
+        $legacy = $request->result;
+        $legacy['tool_calls'] = [['name' => 'ping', 'input' => ['n' => 1]]];
+        $request->forceFill([
+            'result' => $legacy,
+            'completion_hash' => hash('sha256', (string) json_encode(
+                ['executor' => [], 'response' => ['text' => '', 'tool_calls' => [['input' => ['n' => 1], 'name' => 'ping']]]],
+                JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
+            )),
+        ])->save();
+
+        $replay = $service->complete($this->context, $pending->id, $claim['request']['lease_token'], $payload);
+        $this->assertSame($receipt['receipt_id'], $replay['receipt_id']);
+    }
+
+    public function test_the_mcp_completion_receipt_schema_declares_tool_call_ids(): void
+    {
+        $schema = $this->app->make(GenAiMcpToolCatalog::class)->outputSchema('complete_genai_request');
+        $item = $schema['properties']['result']['properties']['tool_calls']['items'];
+
+        $this->assertArrayHasKey('id', $item['properties']);
+        $this->assertContains('id', $item['required']);
+        $this->assertFalse($item['additionalProperties']);
     }
 
     private function completedDelivery(): McpDelivery
