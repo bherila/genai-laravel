@@ -19,6 +19,9 @@ final class SubmissionSchema
             'properties' => [
                 'name' => ['const' => $tool['name']],
                 'input' => $this->wireSchema($tool['input_schema']),
+                // Optional: an executor that has its own call id keeps it, so the
+                // completion correlates with the executor's own records.
+                'id' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 128],
             ],
             'required' => ['name', 'input'],
             'additionalProperties' => false,

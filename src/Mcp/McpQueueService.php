@@ -17,12 +17,17 @@ use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
 use Illuminate\Database\DatabaseManager;
+use Illuminate\Database\DetectsConcurrencyErrors;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
+use Throwable;
 
 final readonly class McpQueueService
 {
+    use DetectsConcurrencyErrors;
+
     public function __construct(
         private DatabaseManager $db,
         private MailboxAccessResolver $access,
@@ -101,10 +106,10 @@ final readonly class McpQueueService
 
                 return $request->fresh(['attachments']);
             });
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             try {
                 $rolledBack = ! McpRequest::query()->whereKey($requestId)->exists();
-            } catch (\Throwable) {
+            } catch (Throwable) {
                 // If database state cannot be established, preserving bytes is safer than
                 // deleting attachments that may already belong to a committed request.
                 $rolledBack = false;
@@ -144,23 +149,106 @@ final readonly class McpQueueService
             throw new McpQueueException('Claim idempotency key is invalid.', 422);
         }
 
+        // Two first uses of one key can both see no receipt and then collide on
+        // the unique index. The loser rolls back and retries, where the winning
+        // receipt is now visible and replays, so an idempotent claim never
+        // surfaces a database error.
+        for ($attempt = 0; ; $attempt++) {
+            try {
+                return $this->attemptClaim($context, $queue, $idempotencyKey);
+            } catch (UniqueConstraintViolationException $e) {
+                if ($idempotencyKey === null || $attempt > 0) {
+                    throw $e;
+                }
+            } catch (Throwable $e) {
+                // MySQL can pick either racer as the deadlock victim instead of
+                // failing the insert, and Laravel reports that as a DeadlockException
+                // rather than a query exception, so match on the cause.
+                if ($idempotencyKey === null || $attempt > 0 || ! $this->causedByConcurrencyError($e)) {
+                    throw $e;
+                }
+            }
+        }
+    }
+
+    /**
+     * The envelope for a live receipt under this key, or null when there is
+     * none to replay. `$discardStale` deletes a receipt that can no longer be
+     * replayed, which is only correct before this call claims for itself.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function replayReceipt(ExecutionContext $context, ?string $queue, string $idempotencyKey, bool $discardStale = false): ?array
+    {
+        $receipt = McpClaimReceipt::query()->where('principal_key', $context->principalKey)
+            ->where('idempotency_key', $idempotencyKey)->lockForUpdate()->first();
+        if ($receipt !== null && $receipt->expires_at->isFuture()) {
+            if ($receipt->queue_filter !== $queue) {
+                throw new McpQueueException('Claim idempotency key was already used with a different queue filter.', 409);
+            }
+            $request = McpRequest::query()->with(['attachments', 'mailbox'])->find($receipt->request_id);
+            if ($request?->status === McpRequestStatus::Leased && $request->lease_expires_at?->isFuture()
+                && $this->access->authorize($context, $request->mailbox, 'genai:work', $request)) {
+                return $this->envelope($request, $this->leaseTokens->forReceipt($receipt));
+            }
+        }
+        if ($discardStale) {
+            $receipt?->delete();
+        }
+
+        return null;
+    }
+
+    /**
+     * Every submitted tool call carries an id, so multiple or repeated calls can
+     * be correlated through assistantMessage() and toolResultFor(). An executor's
+     * own id is kept; otherwise the id is derived from the request and the call's
+     * position, which keeps an idempotent replay byte-identical.
+     *
+     * @param  mixed  $calls
+     * @return mixed
+     */
+    private function identifiedToolCalls(string $requestId, $calls)
+    {
+        if (! is_array($calls)) {
+            return $calls;
+        }
+        $seen = [];
+        foreach ($calls as $index => $call) {
+            if (! is_array($call) || ! is_int($index)) {
+                return $calls;
+            }
+            if (array_key_exists('id', $call)) {
+                // A supplied id is left exactly as sent, so a malformed one
+                // fails the advertised schema instead of being replaced.
+                $id = $call['id'];
+                if (! is_string($id) || $id === '') {
+                    continue;
+                }
+            } else {
+                $id = 'genai_'.substr(hash('sha256', $requestId.'|'.$index.'|'.(string) ($call['name'] ?? '')), 0, 24);
+            }
+            if (isset($seen[$id])) {
+                throw new McpQueueException('Tool call ids must be unique within a completion.', 422);
+            }
+            $seen[$id] = true;
+            $calls[$index] = ['id' => $id] + $call;
+        }
+
+        return $calls;
+    }
+
+    /** @return array<string, mixed>|null */
+    private function attemptClaim(ExecutionContext $context, ?string $queue, ?string $idempotencyKey): ?array
+    {
         return $this->db->connection()->transaction(function () use ($context, $queue, $idempotencyKey): ?array {
             $this->expireRequests($context, $queue);
             $this->failExhaustedLeases($context, $queue);
             if ($idempotencyKey !== null) {
-                $receipt = McpClaimReceipt::query()->where('principal_key', $context->principalKey)
-                    ->where('idempotency_key', $idempotencyKey)->lockForUpdate()->first();
-                if ($receipt !== null && $receipt->expires_at->isFuture()) {
-                    if ($receipt->queue_filter !== $queue) {
-                        throw new McpQueueException('Claim idempotency key was already used with a different queue filter.', 409);
-                    }
-                    $request = McpRequest::query()->with(['attachments', 'mailbox'])->find($receipt->request_id);
-                    if ($request?->status === McpRequestStatus::Leased && $request->lease_expires_at?->isFuture()
-                        && $this->access->authorize($context, $request->mailbox, 'genai:work', $request)) {
-                        return $this->envelope($request, $this->leaseTokens->forReceipt($receipt));
-                    }
+                $replay = $this->replayReceipt($context, $queue, $idempotencyKey, true);
+                if ($replay !== null) {
+                    return $replay;
                 }
-                $receipt?->delete();
             }
 
             $request = null;
@@ -181,7 +269,10 @@ final readonly class McpQueueService
                 }
             }
             if ($request === null) {
-                return null;
+                // A concurrent first use of the same key may have taken the only
+                // eligible request while this call waited on its row lock, so the
+                // race ends in no candidate rather than a unique violation.
+                return $idempotencyKey === null ? null : $this->replayReceipt($context, $queue, $idempotencyKey);
             }
 
             $receipt = null;
@@ -231,6 +322,19 @@ final readonly class McpQueueService
             }
             $request->lease_expires_at = $next;
             $request->save();
+            // Only the receipt that derives the token being renewed: extending
+            // every receipt for this request would resurrect a key from an
+            // earlier claim, whose derived token no longer opens this lease.
+            $receipts = McpClaimReceipt::query()
+                ->where('request_id', $request->id)
+                ->where('principal_key', $context->principalKey)
+                ->get();
+            foreach ($receipts as $receipt) {
+                if (hash_equals($leaseToken, $this->leaseTokens->forReceipt($receipt)) && $receipt->expires_at->lessThan($next)) {
+                    $receipt->forceFill(['expires_at' => $next])->save();
+                    break;
+                }
+            }
 
             return $this->envelope($request->load('attachments'), $leaseToken);
         });
@@ -257,14 +361,18 @@ final readonly class McpQueueService
                 throw new McpQueueException('Executor metadata values must be strings.', 422);
             }
         }
-        $response = ['text' => $response['text'] ?? '', 'tool_calls' => $response['tool_calls'] ?? []];
-        $canonical = $this->canonicalJson(['response' => $response, 'executor' => $executor]);
-        $hash = hash('sha256', $canonical);
+        $submitted = ['text' => $response['text'] ?? '', 'tool_calls' => $response['tool_calls'] ?? []];
+        $response = ['text' => $submitted['text'], 'tool_calls' => $this->identifiedToolCalls($requestId, $submitted['tool_calls'])];
+        $hash = hash('sha256', $this->canonicalJson(['response' => $response, 'executor' => $executor]));
+        // A completion committed before tool-call ids existed was hashed without
+        // them, so its replay must still match rather than answer 409.
+        $legacyHash = hash('sha256', $this->canonicalJson(['response' => $submitted, 'executor' => $executor]));
 
-        return $this->db->connection()->transaction(function () use ($context, $requestId, $leaseToken, $response, $executor, $hash): array {
+        return $this->db->connection()->transaction(function () use ($context, $requestId, $leaseToken, $response, $executor, $hash, $legacyHash): array {
             $request = $this->authorizedRequest($context, $requestId, 'genai:work', true);
             if ($request->status === McpRequestStatus::Completed) {
-                if (hash_equals((string) $request->completion_hash, $hash)
+                $stored = (string) $request->completion_hash;
+                if ((hash_equals($stored, $hash) || hash_equals($stored, $legacyHash))
                     && hash_equals((string) $request->completion_lease_hash, hash('sha256', $leaseToken))
                     && $request->completion_principal === $context->principalKey) {
                     return $this->receipt($request);
@@ -563,7 +671,14 @@ final readonly class McpQueueService
     /** @return array<string, mixed> */
     private function receipt(McpRequest $request): array
     {
-        return ['request_id' => $request->id, 'status' => 'completed', 'receipt_id' => $request->completion_receipt_id, 'result' => $request->result];
+        $result = $request->result;
+        // A result stored before tool-call ids existed still has to satisfy the
+        // receipt schema that now requires them.
+        if (is_array($result) && ($result['tool_calls'] ?? []) !== []) {
+            $result['tool_calls'] = $this->identifiedToolCalls($request->id, $result['tool_calls']);
+        }
+
+        return ['request_id' => $request->id, 'status' => 'completed', 'receipt_id' => $request->completion_receipt_id, 'result' => $result];
     }
 
     /**

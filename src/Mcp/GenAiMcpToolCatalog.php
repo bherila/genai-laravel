@@ -103,9 +103,10 @@ final class GenAiMcpToolCatalog
             'result' => $this->object([
                 'text' => ['type' => 'string'],
                 'tool_calls' => ['type' => 'array', 'items' => $this->object([
+                    'id' => ['type' => 'string', 'minLength' => 1],
                     'name' => ['type' => 'string'],
                     'input' => ['type' => 'object'],
-                ], ['name', 'input'])],
+                ], ['id', 'name', 'input'])],
                 'executor' => ['type' => 'object', 'additionalProperties' => ['type' => 'string']],
             ], ['text', 'tool_calls']),
         ], ['request_id', 'status', 'receipt_id', 'result']);

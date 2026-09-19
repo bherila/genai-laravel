@@ -756,6 +756,12 @@ curl --fail-with-body --silent --show-error \
 
 `completion.json` contains `lease_token`, `response` (`text` and/or
 `tool_calls`), and optional string-only `executor.client` / `executor.model`.
+Each tool call may carry its own `id`, which the server keeps so the completion
+correlates with the executor's records. A call submitted without one is given a
+stable id derived from the request and the call's position, so every call read
+back through `$response->toolCalls` has a unique id that `toolResultFor()` can
+correlate, and an idempotent replay returns exactly the same ids. Ids must be
+unique within one completion.
 Use the claim idempotency key again after a lost response; use the same completed
 payload and lease token after a lost completion response.
 
