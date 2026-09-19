@@ -8,11 +8,16 @@ use Bherila\GenAiLaravel\GenAiServiceProvider;
 use Bherila\GenAiLaravel\Mcp\Enums\McpRequestStatus;
 use Bherila\GenAiLaravel\Mcp\Exceptions\McpQueueException;
 use Bherila\GenAiLaravel\Mcp\ExecutionContext;
+use Bherila\GenAiLaravel\Mcp\Http\McpPreAuthGuard;
 use Bherila\GenAiLaravel\Mcp\McpClientFactory;
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
+use Closure;
+use Illuminate\Contracts\Http\Kernel as HttpKernel;
+use Illuminate\Foundation\Http\Middleware\TrimStrings;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Orchestra\Testbench\TestCase;
@@ -129,6 +134,46 @@ final class McpHttpHardeningTest extends TestCase
         $this->withServerVariables(['REMOTE_ADDR' => '192.0.2.2'])->getJson('/genai/mcp/v1/queue/status')->assertStatus(401);
     }
 
+    public function test_the_guard_runs_before_global_input_transformers(): void
+    {
+        config(['genai.mcp.rest.max_body_bytes' => 1024]);
+        $kernel = $this->app->make(HttpKernel::class);
+        $kernel->pushMiddleware(RecordingGlobalMiddleware::class);
+        RecordingGlobalMiddleware::$calls = 0;
+
+        $this->postJson('/genai/mcp/v1/claims', ['queue' => str_repeat('x', 2048)])->assertStatus(413);
+        $this->assertSame(0, RecordingGlobalMiddleware::$calls);
+
+        $order = $kernel->getGlobalMiddleware();
+        $guard = array_search(McpPreAuthGuard::class, $order, true);
+        $this->assertSame(array_search(TrustProxies::class, $order, true) + 1, $guard);
+        $this->assertLessThan(array_search(TrimStrings::class, $order, true), $guard);
+    }
+
+    public function test_the_preauth_limit_keys_on_the_client_behind_a_trusted_proxy(): void
+    {
+        config(['genai.mcp.rest.preauth_requests_per_minute' => 1]);
+        TrustProxies::at('*');
+
+        try {
+            $proxy = ['REMOTE_ADDR' => '10.0.0.1'];
+            $this->withServerVariables($proxy + ['HTTP_X_FORWARDED_FOR' => '198.51.100.1'])->getJson('/genai/mcp/v1/queue/status')->assertStatus(401);
+            $this->withServerVariables($proxy + ['HTTP_X_FORWARDED_FOR' => '198.51.100.1'])->getJson('/genai/mcp/v1/queue/status')->assertStatus(429);
+            $this->withServerVariables($proxy + ['HTTP_X_FORWARDED_FOR' => '198.51.100.2'])->getJson('/genai/mcp/v1/queue/status')->assertStatus(401);
+        } finally {
+            TrustProxies::flushState();
+        }
+    }
+
+    public function test_other_routes_are_not_limited_or_capped(): void
+    {
+        config(['genai.mcp.rest.preauth_requests_per_minute' => 1, 'genai.mcp.rest.max_body_bytes' => 16]);
+        $this->app['router']->post('/host/endpoint', fn () => response()->json(['ok' => true]));
+
+        $this->postJson('/host/endpoint', ['padding' => str_repeat('x', 64)])->assertOk();
+        $this->postJson('/host/endpoint', ['padding' => str_repeat('x', 64)])->assertOk();
+    }
+
     public function test_valid_principals_remain_bound_by_the_post_auth_limit(): void
     {
         config(['genai.mcp.rest.preauth_requests_per_minute' => 100, 'genai.mcp.rest.requests_per_minute' => 1]);
@@ -141,6 +186,18 @@ final class McpHttpHardeningTest extends TestCase
     private function mailbox(): McpMailbox
     {
         return McpMailbox::query()->create(['owner_type' => 'user', 'owner_id' => '1', 'name' => 'default', 'enabled' => true]);
+    }
+}
+
+final class RecordingGlobalMiddleware
+{
+    public static int $calls = 0;
+
+    public function handle(Request $request, Closure $next): mixed
+    {
+        self::$calls++;
+
+        return $next($request);
     }
 }
 
