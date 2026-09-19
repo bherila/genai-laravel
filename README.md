@@ -674,7 +674,7 @@ the host principal in `genai.mcp.server.middleware` and
 Ahead of that middleware, both stacks apply a per-IP limit
 (`GENAI_MCP_PREAUTH_REQUESTS_PER_MINUTE`, default 300), so an invalid-token flood
 never reaches token lookup. The REST stack also refuses bodies over
-`GENAI_MCP_REST_MAX_BODY_BYTES` (default 1 MiB + 64 KiB) before decoding them.
+`GENAI_MCP_REST_MAX_BODY_BYTES` (default: twice `GENAI_MCP_MAX_COMPLETION_BYTES` plus 64 KiB) before decoding them.
 The per-principal `GENAI_MCP_REQUESTS_PER_MINUTE` limit still applies after
 authentication. Behind a proxy, configure trusted proxies so the client IP is
 the real one.

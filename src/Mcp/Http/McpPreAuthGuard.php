@@ -57,7 +57,11 @@ final readonly class McpPreAuthGuard
         $path = trim($request->path(), '/');
         $prefix = trim((string) config('genai.mcp.rest.prefix', 'genai/mcp/v1'), '/');
         if ((bool) config('genai.mcp.rest.enabled', true) && ($path === $prefix || str_starts_with($path, $prefix.'/'))) {
-            return (int) config('genai.mcp.rest.max_body_bytes', 1114112);
+            $configured = config('genai.mcp.rest.max_body_bytes');
+
+            return is_numeric($configured)
+                ? (int) $configured
+                : 2 * (int) config('genai.mcp.limits.max_completion_bytes', 1048576) + 65536;
         }
         if ((bool) config('genai.mcp.server.enabled', false) && $path === trim((string) config('genai.mcp.server.path', 'genai/mcp'), '/')) {
             return (int) config('genai.mcp.server.max_body_bytes', 262144);

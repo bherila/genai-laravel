@@ -196,8 +196,9 @@ return [
             'requests_per_minute' => (int) env('GENAI_MCP_REQUESTS_PER_MINUTE', 60),
             // Per client IP, before bearer-token lookup. Also applies to the standalone server.
             'preauth_requests_per_minute' => (int) env('GENAI_MCP_PREAUTH_REQUESTS_PER_MINUTE', 300),
-            // Checked before JSON decoding; leaves headroom over max_completion_bytes for the envelope.
-            'max_body_bytes' => (int) env('GENAI_MCP_REST_MAX_BODY_BYTES', 1114112),
+            // Checked before JSON decoding. Unset, it follows max_completion_bytes:
+            // twice that (a pretty-printed or escaped completion) plus 64 KiB of envelope.
+            'max_body_bytes' => env('GENAI_MCP_REST_MAX_BODY_BYTES'),
         ],
         'server' => [
             'enabled' => env('GENAI_MCP_SERVER_ENABLED', false),

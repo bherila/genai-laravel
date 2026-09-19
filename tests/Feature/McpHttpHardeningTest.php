@@ -150,6 +150,25 @@ final class McpHttpHardeningTest extends TestCase
         $this->assertLessThan(array_search(TrimStrings::class, $order, true), $guard);
     }
 
+    public function test_the_rest_cap_follows_the_completion_limit_unless_set(): void
+    {
+        $guard = $this->app->make(McpPreAuthGuard::class);
+        $send = fn (int $bytes): int => $guard->handle(
+            Request::create('/genai/mcp/v1/claims', 'POST', [], [], [], ['CONTENT_TYPE' => 'application/json'], str_repeat('x', $bytes)),
+            fn () => response('reached'),
+        )->getStatusCode();
+        config(['genai.mcp.rest.preauth_requests_per_minute' => 100, 'genai.mcp.rest.max_body_bytes' => null]);
+
+        // A host that raised the completion limit keeps accepting completions of that size.
+        config(['genai.mcp.limits.max_completion_bytes' => 2 * 1048576]);
+        $this->assertSame(200, $send(2 * 1048576 + 1024));
+        $this->assertSame(413, $send(4 * 1048576 + 65537));
+
+        config(['genai.mcp.rest.max_body_bytes' => '4096']);
+        $this->assertSame(200, $send(4096));
+        $this->assertSame(413, $send(4097));
+    }
+
     public function test_an_undeclared_oversized_body_is_read_only_one_byte_past_the_cap(): void
     {
         config(['genai.mcp.rest.max_body_bytes' => 1024]);
