@@ -6,6 +6,9 @@ use Closure;
 use Illuminate\Cache\RateLimiter;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Routing\Route;
+use Illuminate\Routing\RouteCollectionInterface;
+use Illuminate\Routing\Router;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -18,7 +21,7 @@ use Symfony\Component\HttpFoundation\Response;
  */
 final readonly class McpPreAuthGuard
 {
-    public function __construct(private RateLimiter $limiter) {}
+    public function __construct(private RateLimiter $limiter, private Router $router) {}
 
     public function handle(Request $request, Closure $next): Response
     {
@@ -48,26 +51,52 @@ final readonly class McpPreAuthGuard
         return $response;
     }
 
-    /** The body cap for the package endpoint this request targets, or null for any other route. */
+    /** Named REST routes in routes/mcp.php; the guard's only knowledge of which requests are the package's. */
+    public const array REST_ROUTES = [
+        'genai.mcp.queue.status', 'genai.mcp.claims.store', 'genai.mcp.requests.show', 'genai.mcp.requests.lease',
+        'genai.mcp.requests.complete', 'genai.mcp.requests.fail', 'genai.mcp.attachments.show',
+    ];
+
+    public const string SERVER_ROUTE = 'genai.mcp.server';
+
+    /**
+     * The body cap for the package endpoint this request targets, or null for
+     * any other route. Matched against the registered routes themselves rather
+     * than re-derived from config, so any prefix or path the router accepts
+     * (including an empty REST prefix) is guarded exactly as it is routed.
+     */
     private function bodyLimit(Request $request): ?int
     {
         if (! (bool) config('genai.mcp.enabled', false)) {
             return null;
         }
-        $path = trim($request->path(), '/');
-        $prefix = trim((string) config('genai.mcp.rest.prefix', 'genai/mcp/v1'), '/');
-        if ((bool) config('genai.mcp.rest.enabled', true) && ($path === $prefix || str_starts_with($path, $prefix.'/'))) {
+        $routes = $this->router->getRoutes();
+        if ($this->matchesAny($routes, $request, [self::SERVER_ROUTE])) {
+            return (int) config('genai.mcp.server.max_body_bytes', 262144);
+        }
+        if ($this->matchesAny($routes, $request, self::REST_ROUTES)) {
             $configured = config('genai.mcp.rest.max_body_bytes');
 
             return is_numeric($configured)
                 ? (int) $configured
                 : 2 * (int) config('genai.mcp.limits.max_completion_bytes', 1048576) + 65536;
         }
-        if ((bool) config('genai.mcp.server.enabled', false) && $path === trim((string) config('genai.mcp.server.path', 'genai/mcp'), '/')) {
-            return (int) config('genai.mcp.server.max_body_bytes', 262144);
-        }
 
         return null;
+    }
+
+    /** @param list<string> $names */
+    private function matchesAny(RouteCollectionInterface $routes, Request $request, array $names): bool
+    {
+        foreach ($names as $name) {
+            $route = $routes->getByName($name);
+            // Method is ignored so a wrong-method request to a package path is still capped.
+            if ($route instanceof Route && $route->matches($request, false)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
