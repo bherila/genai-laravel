@@ -118,6 +118,26 @@ final class McpQueueIntegrityTest extends TestCase
         $this->assertSame($renewed['request']['lease_expires_at'], $replay['request']['lease_expires_at']);
     }
 
+    public function test_renewal_does_not_resurrect_a_superseded_claim_key(): void
+    {
+        $mailbox = $this->mailbox();
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->prompt('Hi')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $first = $service->claim($this->context, idempotencyKey: 'old-key');
+
+        // The first lease and its receipt expire; the same principal reclaims
+        // the request under a new key and renews that lease.
+        $this->travel(31)->minutes();
+        $second = $service->claim($this->context, idempotencyKey: 'new-key');
+        $this->assertNotSame($first['request']['lease_token'], $second['request']['lease_token']);
+        $service->renew($this->context, $second['request']['id'], $second['request']['lease_token']);
+
+        $old = McpClaimReceipt::query()->where('idempotency_key', 'old-key')->first();
+        $this->assertTrue($old === null || $old->expires_at->isPast(), 'A superseded receipt was extended.');
+        $replay = $service->claim($this->context, idempotencyKey: 'old-key');
+        $this->assertTrue($replay === null || $replay['request']['lease_token'] !== $first['request']['lease_token'], 'A stale key replayed a token that no longer opens the lease.');
+    }
+
     public function test_a_lost_race_on_a_claim_key_replays_the_winner_instead_of_erroring(): void
     {
         $mailbox = $this->mailbox();
