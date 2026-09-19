@@ -17,6 +17,7 @@ use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
 use Illuminate\Database\DatabaseManager;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
@@ -144,6 +145,24 @@ final readonly class McpQueueService
             throw new McpQueueException('Claim idempotency key is invalid.', 422);
         }
 
+        // Two first uses of one key can both see no receipt and then collide on
+        // the unique index. The loser rolls back and retries, where the winning
+        // receipt is now visible and replays, so an idempotent claim never
+        // surfaces a database error.
+        for ($attempt = 0; ; $attempt++) {
+            try {
+                return $this->attemptClaim($context, $queue, $idempotencyKey);
+            } catch (UniqueConstraintViolationException $e) {
+                if ($idempotencyKey === null || $attempt > 0) {
+                    throw $e;
+                }
+            }
+        }
+    }
+
+    /** @return array<string, mixed>|null */
+    private function attemptClaim(ExecutionContext $context, ?string $queue, ?string $idempotencyKey): ?array
+    {
         return $this->db->connection()->transaction(function () use ($context, $queue, $idempotencyKey): ?array {
             $this->expireRequests($context, $queue);
             $this->failExhaustedLeases($context, $queue);

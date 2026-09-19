@@ -13,10 +13,14 @@ use Bherila\GenAiLaravel\Mcp\Models\McpClaimReceipt;
 use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
+use Illuminate\Database\Events\TransactionRolledBack;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
 use Orchestra\Testbench\TestCase;
+use PDOException;
 
 /** Lease-ownership and idempotency integrity for the queue (#44, #34, #40, #31). */
 final class McpQueueIntegrityTest extends TestCase
@@ -45,6 +49,7 @@ final class McpQueueIntegrityTest extends TestCase
         Storage::fake('local');
         $this->context = new ExecutionContext('test-principal', [], ['genai:read', 'genai:work']);
         $this->app->instance(MailboxAccessResolver::class, new IntegrityMailboxAccessResolver($this->context));
+        ClaimRaceState::$collided = false;
     }
 
     public function test_a_slow_delivery_worker_cannot_clear_a_newer_owners_lease(): void
@@ -107,6 +112,38 @@ final class McpQueueIntegrityTest extends TestCase
         $this->assertSame($renewed['request']['lease_expires_at'], $replay['request']['lease_expires_at']);
     }
 
+    public function test_a_lost_race_on_a_claim_key_replays_the_winner_instead_of_erroring(): void
+    {
+        $mailbox = $this->mailbox();
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))->prompt('Hi')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $winner = null;
+
+        // This invocation loses the race: its receipt insert hits the unique
+        // index, and the competing claim commits while it rolls back.
+        McpClaimReceipt::creating(function (): void {
+            if (ClaimRaceState::$collided) {
+                return;
+            }
+            ClaimRaceState::$collided = true;
+            throw new UniqueConstraintViolationException('testing', 'insert into genai_mcp_claim_receipts', [], new PDOException('UNIQUE constraint failed'));
+        });
+        Event::listen(TransactionRolledBack::class, function () use ($service, &$winner): void {
+            if (ClaimRaceState::$collided && $winner === null) {
+                $winner = $service->claim($this->context, idempotencyKey: 'race:1');
+            }
+        });
+
+        $claim = $service->claim($this->context, idempotencyKey: 'race:1');
+
+        $this->assertTrue(ClaimRaceState::$collided, 'The race was never exercised.');
+        $this->assertNotNull($winner);
+        $this->assertSame($winner['request']['id'], $claim['request']['id']);
+        $this->assertSame($winner['request']['lease_token'], $claim['request']['lease_token']);
+        $this->assertSame(1, McpClaimReceipt::query()->where('idempotency_key', 'race:1')->count());
+        $this->assertSame(1, McpRequest::query()->firstOrFail()->attempt_count, 'The rolled-back attempt was counted.');
+    }
+
     private function completedDelivery(): McpDelivery
     {
         $mailbox = $this->mailbox();
@@ -126,6 +163,11 @@ final class McpQueueIntegrityTest extends TestCase
 
         return $mailbox;
     }
+}
+
+final class ClaimRaceState
+{
+    public static bool $collided = false;
 }
 
 /** Mutates the record while the handler runs, as a concurrent worker would. */
