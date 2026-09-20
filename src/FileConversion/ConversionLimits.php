@@ -47,6 +47,24 @@ final class ConversionLimits
     ) {}
 
     /**
+     * A copy whose output ceiling is at most $bytes.
+     *
+     * Only ever tightens: a provider's remaining request budget can make a
+     * conversion smaller than the configured ceiling, never larger, so a host
+     * that lowered $maxOutputBytes keeps the value it chose.
+     */
+    public function withMaxOutputBytes(int $bytes): self
+    {
+        return new self(
+            maxInputBytes: $this->maxInputBytes,
+            maxOutputBytes: max(0, min($this->maxOutputBytes, $bytes)),
+            maxRowsPerSheet: $this->maxRowsPerSheet,
+            maxCells: $this->maxCells,
+            maxSeconds: $this->maxSeconds,
+        );
+    }
+
+    /**
      * Build limits from `config('genai.conversion')`, falling back to the
      * defaults above for any key that is absent or null.
      *

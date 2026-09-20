@@ -19,6 +19,9 @@ class SpreadsheetToTextTest extends TestCase
 {
     private const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
+    /** Built once: every budget test needs the same oversized workbook. */
+    private static ?string $hugeXlsx = null;
+
     /** Build a small two-sheet workbook and return it as base64. */
     private function makeXlsxBase64(): string
     {
@@ -289,6 +292,96 @@ class SpreadsheetToTextTest extends TestCase
             return str_contains($body, '2025-01-15')
                 && str_contains($body, '12.34%')
                 && ! str_contains($body, '45672');
+        });
+    }
+
+    // ── extraction is bounded by the provider request budget ─────────────────
+
+    /**
+     * A workbook whose extract is far larger than any provider request budget.
+     *
+     * Few, very wide cells rather than many small ones: the extract still has
+     * to clear 20 MB, but building it costs a fraction of the cell objects —
+     * and it is built once for the whole class, because every test here needs
+     * the same oversized input.
+     */
+    private function makeHugeXlsxBase64(): string
+    {
+        if (self::$hugeXlsx !== null) {
+            return self::$hugeXlsx;
+        }
+
+        $spreadsheet = new Spreadsheet;
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('Big');
+        $cell = str_repeat('x', 2_000);
+        for ($row = 1; $row <= 600; $row++) {
+            for ($column = 1; $column <= 25; $column++) {
+                $sheet->setCellValue([$column, $row], $cell);
+            }
+        }
+
+        $tmp = tempnam(sys_get_temp_dir(), 'test_big_xlsx_');
+        (new XlsxWriter($spreadsheet))->save($tmp);
+        $bytes = file_get_contents($tmp);
+        @unlink($tmp);
+        $spreadsheet->disconnectWorksheets();
+
+        return self::$hugeXlsx = base64_encode((string) $bytes);
+    }
+
+    /**
+     * The standalone conversion ceiling is as large as — on Gemini, larger
+     * than — the whole request budget, so an unbounded extract fills the
+     * request by itself and the aggregate check throws it away after the work
+     * is already paid for. The extract has to know its allowance instead.
+     */
+    public function test_gemini_sends_a_truncated_extract_rather_than_failing_the_request(): void
+    {
+        Http::fake(['*' => Http::response(['candidates' => []])]);
+
+        (new GeminiClient(apiKey: 'k', model: 'gemini-3.6-flash'))->converse('', [[
+            'role' => 'user',
+            'content' => [
+                ContentBlock::document($this->makeHugeXlsxBase64(), self::XLSX_MIME, 'big.xlsx'),
+                ContentBlock::text('Summarise this.'),
+            ],
+        ]]);
+
+        Http::assertSent(function (Request $request): bool {
+            $body = json_encode($request->data(), JSON_THROW_ON_ERROR);
+
+            return strlen($body) <= GeminiClient::maxRequestBytes()
+                // Still a useful extract: the sheet header, real cell data and
+                // an explicit marker saying where it stopped.
+                && str_contains($body, '=== Sheet: Big ===')
+                && str_contains($body, str_repeat('x', 100))
+                && str_contains($body, 'Truncated: extraction stopped')
+                && str_contains($body, 'Summarise this.');
+        });
+    }
+
+    public function test_anthropic_sends_a_truncated_extract_rather_than_failing_the_request(): void
+    {
+        Http::fake(['*' => Http::response([
+            'content' => [['type' => 'text', 'text' => 'ok']],
+            'usage' => ['input_tokens' => 1, 'output_tokens' => 1],
+        ])]);
+
+        (new AnthropicClient(apiKey: 'k'))->converse('', [[
+            'role' => 'user',
+            'content' => [
+                ContentBlock::document($this->makeHugeXlsxBase64(), self::XLSX_MIME, 'big.xlsx'),
+                ContentBlock::text('Summarise this.'),
+            ],
+        ]]);
+
+        Http::assertSent(function (Request $request): bool {
+            $body = json_encode($request->data(), JSON_THROW_ON_ERROR);
+
+            return strlen($body) <= AnthropicClient::maxRequestBytes()
+                && str_contains($body, '=== Sheet: Big ===')
+                && str_contains($body, 'Truncated: extraction stopped');
         });
     }
 }

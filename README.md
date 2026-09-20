@@ -559,6 +559,15 @@ client counts every message against it. A history whose turns are each under the
 cap can still exceed it once replayed, and it is refused before any document is
 converted or sent.
 
+A spreadsheet that has to be extracted to text shares that request budget with
+the prompt, the history and the tools, so the extract is bounded by what they
+leave rather than by the standalone conversion ceiling — which on Gemini is
+larger than the whole request. An oversized workbook therefore arrives
+truncated, with the marker saying where extraction stopped, instead of being
+built in full and then rejected. The accounting is deliberately conservative, so
+a very large extract may be cut shorter than strictly necessary; lower
+`max_output_bytes` if you would rather choose the size yourself.
+
 Per-file limits are expressed in **decoded** bytes; `maxRequestBytes()` measures
 the finished serialized payload, because a file can sit under its own limit and
 still leave no room for the prompt, the tools or the history — and several files

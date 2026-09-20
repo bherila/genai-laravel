@@ -391,7 +391,7 @@ class AnthropicClient implements GenAiClient, HeartbeatAwareClient
         $payload = [
             'model' => $this->model,
             'max_tokens' => $this->maxTokens,
-            'messages' => $this->convertMessages($messages),
+            'messages' => $this->convertMessages($messages, $this->spreadsheetLimitsFor($system, $messages, $toolConfig)),
         ];
 
         if ($system !== '') {
@@ -621,20 +621,86 @@ class AnthropicClient implements GenAiClient, HeartbeatAwareClient
     }
 
     /** @param  list<array{role: string, content: list<ContentBlock>}>  $messages */
-    private function convertMessages(array $messages): array
+    private function convertMessages(array $messages, ConversionLimits $spreadsheetLimits): array
     {
-        return array_map(function (array $msg) {
-            return [
-                'role' => $msg['role'],
-                'content' => array_map(
-                    fn (ContentBlock $b) => $this->contentBlockToAnthropic($b),
-                    $msg['content'],
-                ),
-            ];
-        }, $messages);
+        return array_map(fn (array $msg) => [
+            'role' => $msg['role'],
+            'content' => array_map(
+                fn (ContentBlock $b) => $this->contentBlockToAnthropic($b, $spreadsheetLimits),
+                $msg['content'],
+            ),
+        ], $messages);
     }
 
-    private function contentBlockToAnthropic(ContentBlock $block): array
+    /**
+     * Conversion limits tightened to what this request can still afford to
+     * spend on extracted spreadsheet text.
+     *
+     * The standalone conversion ceiling is as large as the whole request budget
+     * on this provider, so an extract could fill the request by itself and
+     * leave no room for the prompt, the history or the tools — work paid for
+     * and then thrown away by the aggregate check. An extract that knows its
+     * allowance truncates itself and still reaches the model.
+     *
+     * Only spreadsheet extraction is bounded this way. A Word document is
+     * rendered to PDF, which fails rather than truncating, so tightening its
+     * ceiling would turn an oversized request into a hard error instead of a
+     * smaller one.
+     *
+     * @param  list<array{role: string, content: list<ContentBlock>}>  $messages
+     */
+    private function spreadsheetLimitsFor(string $system, array $messages, ?ToolConfig $toolConfig): ConversionLimits
+    {
+        $committed = strlen($system);
+        if ($toolConfig !== null) {
+            $committed += strlen((string) json_encode($this->toolConfigToAnthropic($toolConfig)));
+        }
+
+        $conversions = 0;
+        foreach ($messages as $message) {
+            foreach ($message['content'] as $block) {
+                if ($this->convertsToExtractedText($block)) {
+                    $conversions++;
+
+                    continue;
+                }
+                $committed += self::blockWeight($block);
+            }
+        }
+
+        if ($conversions === 0) {
+            return $this->conversionLimits;
+        }
+
+        $allowance = FileLimits::conversionOutputAllowance(self::maxRequestBytes(), $committed, $conversions);
+
+        return $allowance === null ? $this->conversionLimits : $this->conversionLimits->withMaxOutputBytes($allowance);
+    }
+
+    private function convertsToExtractedText(ContentBlock $block): bool
+    {
+        return $block->type === ContentBlock::TYPE_DOCUMENT
+            && ! in_array((string) $block->mimeType, self::SUPPORTED_DOCUMENT_MIME_TYPES, true)
+            && ! in_array((string) $block->mimeType, self::SUPPORTED_IMAGE_MIME_TYPES, true)
+            && SpreadsheetToText::supports((string) $block->mimeType)
+            && SpreadsheetToText::isAvailable();
+    }
+
+    /**
+     * What a block already costs the request budget, measured from the raw
+     * material. A Word document is counted at its input size: the PDF it
+     * renders to is not known until it is built, and is broadly comparable.
+     */
+    private static function blockWeight(ContentBlock $block): int
+    {
+        return match ($block->type) {
+            ContentBlock::TYPE_DOCUMENT => strlen((string) $block->base64),
+            ContentBlock::TYPE_TEXT => strlen((string) $block->text),
+            default => strlen((string) json_encode([$block->toolInput, $block->toolResult, $block->providerMetadata])),
+        };
+    }
+
+    private function contentBlockToAnthropic(ContentBlock $block, ConversionLimits $spreadsheetLimits): array
     {
         if ($block->type === ContentBlock::TYPE_PROVIDER_RAW) {
             return $block->providerMetadata;
@@ -748,7 +814,7 @@ class AnthropicClient implements GenAiClient, HeartbeatAwareClient
             // as text rather than failing — Anthropic only accepts pdf and text/plain
             // as document blocks, so this is the recommended fallback path.
             if (SpreadsheetToText::supports($mime) && SpreadsheetToText::isAvailable()) {
-                $text = SpreadsheetToText::convert((string) $block->base64, $mime, $this->conversionLimits);
+                $text = SpreadsheetToText::convert((string) $block->base64, $mime, $spreadsheetLimits);
 
                 return ['type' => 'text', 'text' => $text];
             }

@@ -3,6 +3,7 @@
 namespace Bherila\GenAiLaravel\Tests\Unit;
 
 use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
 use Bherila\GenAiLaravel\FileLimits;
 use Orchestra\Testbench\TestCase;
 
@@ -99,5 +100,65 @@ class FileLimitsTest extends TestCase
         $this->assertSame('4.5 MB', FileLimits::humanBytes(4_718_592));
         $this->assertSame('20 MB', FileLimits::humanBytes(20 * 1024 * 1024));
         $this->assertSame('2 GB', FileLimits::humanBytes(2 * 1024 * 1024 * 1024));
+    }
+
+    // ── conversion allowance ─────────────────────────────────────────────────
+
+    /**
+     * A conversion ceiling chosen in isolation can exceed the provider's whole
+     * request budget, so the extract is built and the request assembled before
+     * anything notices. The allowance is what the rest of the request leaves
+     * behind, halved for JSON escaping and split between the conversions that
+     * share it.
+     */
+    public function test_allowance_is_what_the_rest_of_the_request_leaves(): void
+    {
+        $budget = 20 * 1024 * 1024;
+        $reserve = 65_536;
+
+        $this->assertSame(
+            intdiv($budget - 0 - $reserve, 2),
+            FileLimits::conversionOutputAllowance($budget, 0),
+        );
+        $this->assertSame(
+            intdiv($budget - 1_000_000 - $reserve, 2),
+            FileLimits::conversionOutputAllowance($budget, 1_000_000),
+        );
+    }
+
+    public function test_conversions_sharing_a_request_split_the_allowance(): void
+    {
+        $budget = 20 * 1024 * 1024;
+
+        $one = FileLimits::conversionOutputAllowance($budget, 0, 1);
+        $four = FileLimits::conversionOutputAllowance($budget, 0, 4);
+
+        $this->assertNotNull($one);
+        $this->assertNotNull($four);
+        $this->assertSame(intdiv($one, 4), $four);
+    }
+
+    public function test_a_request_already_over_budget_leaves_no_allowance(): void
+    {
+        $this->assertSame(0, FileLimits::conversionOutputAllowance(1024, 1024 * 1024));
+    }
+
+    public function test_a_provider_without_a_request_ceiling_imposes_no_allowance(): void
+    {
+        $this->assertNull(FileLimits::conversionOutputAllowance(null, 0));
+        $this->assertNull(FileLimits::conversionOutputAllowance(1024, 0, 0));
+    }
+
+    public function test_the_allowance_only_ever_tightens_configured_limits(): void
+    {
+        $limits = new ConversionLimits(maxOutputBytes: 1_000);
+
+        $this->assertSame(500, $limits->withMaxOutputBytes(500)->maxOutputBytes);
+        // A roomier budget never raises a ceiling the host deliberately lowered.
+        $this->assertSame(1_000, $limits->withMaxOutputBytes(50_000)->maxOutputBytes);
+        $this->assertSame(0, $limits->withMaxOutputBytes(-5)->maxOutputBytes);
+        // Everything else is carried over untouched.
+        $this->assertSame($limits->maxCells, $limits->withMaxOutputBytes(10)->maxCells);
+        $this->assertSame($limits->maxSeconds, $limits->withMaxOutputBytes(10)->maxSeconds);
     }
 }
