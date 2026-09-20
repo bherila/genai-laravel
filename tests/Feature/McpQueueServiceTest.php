@@ -20,6 +20,7 @@ use Bherila\GenAiLaravel\Mcp\McpTokenService;
 use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
+use Bherila\GenAiLaravel\Mcp\PendingGenAiRequest;
 use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -30,6 +31,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Testing\TestResponse;
 use Orchestra\Testbench\TestCase;
 use Symfony\Component\HttpFoundation\JsonResponse;
 
@@ -40,6 +42,10 @@ final class McpQueueServiceTest extends TestCase
     private ExecutionContext $context;
 
     private TestMailboxAccessResolver $resolver;
+
+    private ?string $mcpSessionId = null;
+
+    private int $mcpRequestId = 1;
 
     protected function getPackageProviders($app): array
     {
@@ -475,6 +481,156 @@ final class McpQueueServiceTest extends TestCase
         $delivery = McpDelivery::query()->where('request_id', $pending->id)->firstOrFail();
         $this->assertSame([$delivery->id], $handler->seen);
         $this->assertNotNull($delivery->acknowledged_at);
+    }
+
+    public function test_mcp_completion_replay_ignores_nested_object_member_order(): void
+    {
+        $pending = $this->pendingWithNestedObjectTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $first = $this->mcpToolCall('complete_genai_request', [
+            'request_id' => $pending->id, 'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['b' => '2', 'a' => '1']]]]],
+        ])->assertOk();
+        $replay = $this->mcpToolCall('complete_genai_request', [
+            'request_id' => $pending->id, 'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['a' => '1', 'b' => '2']]]]],
+        ])->assertOk();
+
+        $this->assertSame(
+            $first->json('result.structuredContent.receipt_id'),
+            $replay->json('result.structuredContent.receipt_id'),
+        );
+    }
+
+    public function test_rest_completion_replay_ignores_nested_object_member_order(): void
+    {
+        $pending = $this->pendingWithNestedObjectTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $first = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['b' => '2', 'a' => '1']]]]],
+        ])->assertOk();
+        $replay = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['a' => '1', 'b' => '2']]]]],
+        ])->assertOk();
+
+        $this->assertSame($first->json('receipt_id'), $replay->json('receipt_id'));
+    }
+
+    public function test_completion_replay_with_different_nested_values_still_conflicts(): void
+    {
+        $pending = $this->pendingWithNestedObjectTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['a' => '1', 'b' => '2']]]]],
+        ])->assertOk();
+        $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['a' => '1', 'b' => '3']]]]],
+        ])->assertStatus(409);
+    }
+
+    public function test_completion_replay_ignores_numeric_keyed_nested_member_order(): void
+    {
+        // Numeric-keyed members survive both transports as JSON objects rather
+        // than property maps, so only recursive canonicalization sorts them.
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('record', 'Record fields', Schema::object([
+                'fields' => Schema::fromArray(['type' => 'object']),
+            ], ['fields']))], ToolChoice::any()))
+            ->prompt('Record it')->enqueue();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $first = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['2' => 'b', '1' => 'a']]]]],
+        ])->assertOk();
+        $replay = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['1' => 'a', '2' => 'b']]]]],
+        ])->assertOk();
+
+        $this->assertSame($first->json('receipt_id'), $replay->json('receipt_id'));
+    }
+
+    public function test_mcp_completion_replay_ignores_numeric_keyed_nested_member_order(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('record', 'Record fields', Schema::object([
+                'fields' => Schema::fromArray(['type' => 'object']),
+            ], ['fields']))], ToolChoice::any()))
+            ->prompt('Record it')->enqueue();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $first = $this->mcpToolCall('complete_genai_request', [
+            'request_id' => $pending->id, 'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['2' => 'b', '1' => 'a']]]]],
+        ])->assertOk();
+        $replay = $this->mcpToolCall('complete_genai_request', [
+            'request_id' => $pending->id, 'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['1' => 'a', '2' => 'b']]]]],
+        ])->assertOk();
+
+        $this->assertSame(
+            $first->json('result.structuredContent.receipt_id'),
+            $replay->json('result.structuredContent.receipt_id'),
+        );
+    }
+
+    public function test_enqueue_idempotency_ignores_nested_metadata_member_order(): void
+    {
+        $mailbox = $this->mailbox();
+        $client = $this->app->make(McpClientFactory::class)->forMailbox($mailbox);
+        $first = GenAiRequest::with($client)->prompt('Read it')
+            ->enqueue(new EnqueueOptions(idempotencyKey: 'invoice:9', metadata: ['trace' => ['b' => '2', 'a' => '1']]));
+        $second = GenAiRequest::with($client)->prompt('Read it')
+            ->enqueue(new EnqueueOptions(idempotencyKey: 'invoice:9', metadata: ['trace' => ['a' => '1', 'b' => '2']]));
+
+        $this->assertSame($first->id, $second->id);
+    }
+
+    private function pendingWithNestedObjectTool(): PendingGenAiRequest
+    {
+        return GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('record', 'Record fields', Schema::object([
+                'fields' => Schema::object(['a' => Schema::string(), 'b' => Schema::string()]),
+            ], ['fields']))], ToolChoice::any()))
+            ->prompt('Record it')->enqueue();
+    }
+
+    /**
+     * Drive one tool call over the standalone MCP endpoint, where nested JSON
+     * members reach the queue as objects rather than as property maps.
+     *
+     * @param  array<string, mixed>  $arguments
+     */
+    private function mcpToolCall(string $name, array $arguments): TestResponse
+    {
+        $headers = ['Accept' => 'application/json, text/event-stream', 'Authorization' => 'Bearer test-token'];
+        if ($this->mcpSessionId === null) {
+            $initialize = $this->postJson('/genai/mcp', [
+                'jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize',
+                'params' => ['protocolVersion' => '2025-03-26', 'capabilities' => [], 'clientInfo' => ['name' => 'test', 'version' => '1']],
+            ], $headers)->assertOk();
+            $this->mcpSessionId = $initialize->headers->get('Mcp-Session-Id');
+        }
+        $headers['Mcp-Session-Id'] = $this->mcpSessionId;
+        $headers['Mcp-Protocol-Version'] = '2025-03-26';
+
+        return $this->postJson('/genai/mcp', [
+            'jsonrpc' => '2.0', 'id' => ++$this->mcpRequestId, 'method' => 'tools/call',
+            'params' => ['name' => $name, 'arguments' => $arguments],
+        ], $headers);
     }
 
     private function mailbox(): McpMailbox

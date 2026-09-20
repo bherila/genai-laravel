@@ -63,15 +63,20 @@ final readonly class McpQueueService
             $this->schemas->assertPortable($tool['input_schema']);
         }
         $this->assertPayloadBounds($raw, $options->metadata);
-        $enqueueHash = hash('sha256', $this->canonicalJson([
+        $work = [
             'payload' => $raw, 'queue' => $options->queue, 'priority' => $options->priority,
             'available_at' => $options->availableAt?->format(DATE_ATOM), 'expires_at' => $options->expiresAt?->format(DATE_ATOM),
             'max_attempts' => $options->maxAttempts, 'metadata' => $options->metadata,
-        ]));
+        ];
+        $enqueueHash = hash('sha256', $this->canonicalJson($work));
+        // Work enqueued before nested objects were canonicalized carries the
+        // older digest, and repeating it must still replay rather than look
+        // like a different request under the same key.
+        $enqueueHashes = [$enqueueHash, hash('sha256', $this->legacyCanonicalJson($work))];
 
         $requestId = (string) Str::uuid();
         try {
-            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $enqueueHash, $requestId): McpRequest {
+            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $enqueueHash, $enqueueHashes, $requestId): McpRequest {
                 $mailbox = McpMailbox::query()->lockForUpdate()->find($mailbox->id);
                 if ($mailbox === null) {
                     throw new McpQueueException('Mailbox not found.', 404);
@@ -83,7 +88,7 @@ final readonly class McpQueueService
                     $existing = McpRequest::query()->where('mailbox_id', $mailbox->id)
                         ->where('idempotency_key', $options->idempotencyKey)->lockForUpdate()->first();
                     if ($existing !== null) {
-                        if (! hash_equals((string) $existing->enqueue_hash, $enqueueHash)) {
+                        if (! $this->matchesAny((string) $existing->enqueue_hash, $enqueueHashes)) {
                             throw new McpQueueException('Idempotency key was already used for different work.', 409);
                         }
 
@@ -363,16 +368,14 @@ final readonly class McpQueueService
         }
         $submitted = ['text' => $response['text'] ?? '', 'tool_calls' => $response['tool_calls'] ?? []];
         $response = ['text' => $submitted['text'], 'tool_calls' => $this->identifiedToolCalls($requestId, $submitted['tool_calls'])];
-        $hash = hash('sha256', $this->canonicalJson(['response' => $response, 'executor' => $executor]));
-        // A completion committed before tool-call ids existed was hashed without
-        // them, so its replay must still match rather than answer 409.
-        $legacyHash = hash('sha256', $this->canonicalJson(['response' => $submitted, 'executor' => $executor]));
+        $hashes = $this->completionHashes($submitted, $response, $executor);
+        $hash = $hashes[0];
 
-        return $this->db->connection()->transaction(function () use ($context, $requestId, $leaseToken, $response, $executor, $hash, $legacyHash): array {
+        return $this->db->connection()->transaction(function () use ($context, $requestId, $leaseToken, $response, $executor, $hash, $hashes): array {
             $request = $this->authorizedRequest($context, $requestId, 'genai:work', true);
             if ($request->status === McpRequestStatus::Completed) {
                 $stored = (string) $request->completion_hash;
-                if ((hash_equals($stored, $hash) || hash_equals($stored, $legacyHash))
+                if ($this->matchesAny($stored, $hashes)
                     && hash_equals((string) $request->completion_lease_hash, hash('sha256', $leaseToken))
                     && $request->completion_principal === $context->principalKey) {
                     return $this->receipt($request);
@@ -723,8 +726,86 @@ final readonly class McpQueueService
         return max(1, min(86400, $configured[min(max(0, $attempt - 1), count($configured) - 1)]));
     }
 
+    /**
+     * The digest stored for a completion, followed by the historical encodings
+     * an already-committed completion can still present on replay: one hashed
+     * before tool-call ids existed, and one hashed before nested objects were
+     * canonicalized. A replay matching any of them is the same completion.
+     *
+     * @param  array<string, mixed>  $submitted
+     * @param  array<string, mixed>  $identified
+     * @param  array<string, mixed>  $executor
+     * @return non-empty-list<string>
+     */
+    private function completionHashes(array $submitted, array $identified, array $executor): array
+    {
+        $digest = fn (array $response, bool $legacy): string => hash('sha256', $legacy
+            ? $this->legacyCanonicalJson(['response' => $response, 'executor' => $executor])
+            : $this->canonicalJson(['response' => $response, 'executor' => $executor]));
+
+        return array_values(array_unique([
+            $digest($identified, false),
+            $digest($submitted, false),
+            $digest($identified, true),
+            $digest($submitted, true),
+        ]));
+    }
+
+    /**
+     * Whether a stored digest is any of the ones this call accepts. Every
+     * candidate is compared so the answer does not leak which one matched.
+     *
+     * @param  non-empty-list<string>  $candidates
+     */
+    private function matchesAny(string $stored, array $candidates): bool
+    {
+        $matched = false;
+        foreach ($candidates as $candidate) {
+            $matched = hash_equals($stored, $candidate) || $matched;
+        }
+
+        return $matched;
+    }
+
     /** @param array<string, mixed> $data */
     private function canonicalJson(array $data): string
+    {
+        return json_encode($this->canonicalize($data), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Object members are ordered like array keys, so two payloads that differ
+     * only in how their transport ordered a nested object hash the same. A
+     * decoded object stays an object rather than becoming a property map, so an
+     * empty one still encodes as `{}` and a numeric-keyed one never collapses
+     * into a JSON array and collides with a genuine list.
+     */
+    private function canonicalize(mixed $value): mixed
+    {
+        if (is_object($value)) {
+            $properties = get_object_vars($value);
+            ksort($properties);
+
+            return (object) array_map($this->canonicalize(...), $properties);
+        }
+        if (! is_array($value)) {
+            return $value;
+        }
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return array_map($this->canonicalize(...), $value);
+    }
+
+    /**
+     * The encoding used before nested objects were canonicalized, where object
+     * members kept the order their transport sent them in. Kept only so work
+     * hashed under it still replays instead of answering 409.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function legacyCanonicalJson(array $data): string
     {
         $sort = function (mixed $value) use (&$sort): mixed {
             if (! is_array($value)) {
