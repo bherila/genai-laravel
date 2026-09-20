@@ -109,9 +109,27 @@ final class SpreadsheetToText
 
             try {
                 $reader = IOFactory::createReaderForFile($tmp);
-                // Formatting is irrelevant to a text extract and is the bulk of the
-                // memory an XLSX costs to load, so never materialise it.
-                $reader->setReadDataOnly(true);
+                // Number formats are what make a spreadsheet readable: they turn a
+                // serial into a date, a fraction into a percentage and a bare number
+                // into a currency amount. They live in the workbook's style records,
+                // which setReadDataOnly(true) skips entirely — so getFormattedValue()
+                // below used to hand the model `45672` for a cell the sheet plainly
+                // shows as `2025-01-15`, with nothing to signal the difference.
+                //
+                // PhpSpreadsheet has no "formats but not fonts" lever, so the styles
+                // load as a unit. They cost much less than the old comment here
+                // claimed: a workbook dedupes its style records, so the price is set
+                // by how many distinct formats it uses, not by how many cells it has.
+                // A 40,000-cell workbook with eight formats measured no extra peak
+                // memory and about a third more parse time. The ceilings in
+                // ConversionLimits still bound both, and they remain what they always
+                // were — a guard against runaway honest documents, not a sandbox.
+                $reader->setReadDataOnly(false);
+                // Charts, drawings and external images are already off by default;
+                // none of them can reach a text extract, and the last would make a
+                // conversion fetch a URL the document chose.
+                $reader->setIncludeCharts(false);
+                $reader->setAllowExternalImages(false);
                 $spreadsheet = $reader->load($tmp);
             } catch (\Throwable $e) {
                 throw new GenAiFatalException('SpreadsheetToText: failed to read spreadsheet — '.$e->getMessage(), 0, $e);

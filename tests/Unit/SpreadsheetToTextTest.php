@@ -10,7 +10,9 @@ use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Orchestra\Testbench\TestCase;
+use PhpOffice\PhpSpreadsheet\Shared\Date;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Style\NumberFormat;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
 
 class SpreadsheetToTextTest extends TestCase
@@ -38,6 +40,40 @@ class SpreadsheetToTextTest extends TestCase
         ]);
 
         $tmp = tempnam(sys_get_temp_dir(), 'test_xlsx_');
+        (new XlsxWriter($spreadsheet))->save($tmp);
+        $bytes = file_get_contents($tmp);
+        @unlink($tmp);
+
+        return base64_encode($bytes);
+    }
+
+    /**
+     * A workbook whose numeric cells carry native display formats. Each value is
+     * stored as the bare number Excel keeps on disk; only the number format says
+     * what it means, which is exactly the information a data-only read discards.
+     */
+    private function makeFormattedXlsxBase64(): string
+    {
+        $spreadsheet = new Spreadsheet;
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('Formats');
+
+        $rows = [
+            // [label, stored value, format code]
+            ['date', Date::PHPToExcel(new \DateTimeImmutable('2025-01-15')), 'yyyy-mm-dd'],
+            ['time', 0.5, 'hh:mm'],
+            ['percent', 0.1234, '0.00%'],
+            ['currency', 1234.5, '"$"#,##0.00'],
+            ['plain', 42, NumberFormat::FORMAT_GENERAL],
+        ];
+        foreach ($rows as $index => [$label, $value, $format]) {
+            $line = $index + 1;
+            $sheet->setCellValue('A'.$line, $label);
+            $sheet->setCellValue('B'.$line, $value);
+            $sheet->getStyle('B'.$line)->getNumberFormat()->setFormatCode($format);
+        }
+
+        $tmp = tempnam(sys_get_temp_dir(), 'test_fmt_xlsx_');
         (new XlsxWriter($spreadsheet))->save($tmp);
         $bytes = file_get_contents($tmp);
         @unlink($tmp);
@@ -186,6 +222,73 @@ class SpreadsheetToTextTest extends TestCase
             return ! $hasInlineData
                 && str_contains($extractedText, 'INV-001')
                 && str_contains($extractedText, 'Summarize.');
+        });
+    }
+
+    // ── display formats survive extraction ───────────────────────────────────
+
+    /**
+     * A spreadsheet stores `2025-01-15` as the number 45672 and `12.34%` as
+     * 0.1234; the number format is the only thing that says which is which.
+     * Reading data only discarded it, so the model was handed the serials with
+     * nothing to mark them as dates — a silent loss of meaning, not a
+     * formatting nicety.
+     */
+    public function test_native_numeric_formats_are_extracted_as_displayed_values(): void
+    {
+        $text = SpreadsheetToText::convert($this->makeFormattedXlsxBase64(), self::XLSX_MIME);
+
+        $this->assertStringContainsString("date\t2025-01-15", $text);
+        $this->assertStringContainsString("time\t12:00", $text);
+        $this->assertStringContainsString("percent\t12.34%", $text);
+        $this->assertStringContainsString('currency'."\t".'$1,234.50', $text);
+    }
+
+    public function test_unformatted_values_are_unchanged(): void
+    {
+        $text = SpreadsheetToText::convert($this->makeFormattedXlsxBase64(), self::XLSX_MIME);
+
+        $this->assertStringContainsString("plain\t42", $text);
+        $this->assertStringNotContainsString('45672', $text);
+        $this->assertStringNotContainsString('0.1234', $text);
+    }
+
+    public function test_anthropic_sends_displayed_values_not_stored_serials(): void
+    {
+        Http::fake(['*' => Http::response([
+            'content' => [['type' => 'text', 'text' => 'ok']],
+            'usage' => ['input_tokens' => 1, 'output_tokens' => 1],
+        ])]);
+
+        (new AnthropicClient(apiKey: 'k'))->converse('', [[
+            'role' => 'user',
+            'content' => [ContentBlock::document($this->makeFormattedXlsxBase64(), self::XLSX_MIME, 'book.xlsx')],
+        ]]);
+
+        Http::assertSent(function (Request $request): bool {
+            $body = json_encode($request->data(), JSON_THROW_ON_ERROR);
+
+            return str_contains($body, '2025-01-15')
+                && str_contains($body, '12.34%')
+                && ! str_contains($body, '45672');
+        });
+    }
+
+    public function test_gemini_sends_displayed_values_not_stored_serials(): void
+    {
+        Http::fake(['*' => Http::response(['candidates' => []])]);
+
+        (new GeminiClient(apiKey: 'k', model: 'gemini-3.6-flash'))->converse('', [[
+            'role' => 'user',
+            'content' => [ContentBlock::document($this->makeFormattedXlsxBase64(), self::XLSX_MIME, 'book.xlsx')],
+        ]]);
+
+        Http::assertSent(function (Request $request): bool {
+            $body = json_encode($request->data(), JSON_THROW_ON_ERROR);
+
+            return str_contains($body, '2025-01-15')
+                && str_contains($body, '12.34%')
+                && ! str_contains($body, '45672');
         });
     }
 }
