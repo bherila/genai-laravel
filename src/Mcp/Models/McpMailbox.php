@@ -3,13 +3,18 @@
 namespace Bherila\GenAiLaravel\Mcp\Models;
 
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
  * @property string $id
+ * @property string $owner_type
+ * @property string $owner_id
+ * @property string $name
  * @property bool $enabled
+ * @property-read Collection<int, McpRequest> $requests
  */
 final class McpMailbox extends Model
 {

@@ -8,6 +8,8 @@ use Illuminate\Support\Carbon;
 
 /**
  * @property string $id
+ * @property string $request_id
+ * @property string $type
  * @property array<string, mixed> $payload
  * @property Carbon $available_at
  * @property Carbon|null $acknowledged_at
