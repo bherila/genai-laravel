@@ -548,16 +548,10 @@ three separate questions rather than one number:
 ```php
 $client::maxInlineFileBytes('application/pdf'); // decoded bytes for one inline block
 $client::maxUploadedFileBytes();                // decoded bytes via the File API, null when there is none
-$client::maxInlineBlocksPerMessage($mime);      // blocks of that kind, null when uncapped
+$client::maxInlineBlocksPerMessage($mime);      // blocks of that kind per message, null when uncapped
 $client::maxRequestBytes();                    // whole serialized request, null when uncapped
 $client::supportsFileApi();                     // whether uploadFile() will work at all
 ```
-
-Where a provider applies its block ceiling to the whole request rather than to
-one message — Bedrock Converse does, at five documents and twenty images — the
-client counts every message against it. A history whose turns are each under the
-cap can still exceed it once replayed, and it is refused before any document is
-converted or sent.
 
 A spreadsheet that has to be extracted to text shares that request budget with
 the prompt, the history and the tools, so the extract is bounded by what they
@@ -874,10 +868,8 @@ back. Passing an explicit number still wins. Reading the property back can now
 return `null`, so code that did arithmetic on `$options->maxAttempts` needs to
 resolve it first.
 
-Two limits also got stricter, both rejecting earlier rather than differently:
-Bedrock counts its five-document and twenty-image ceilings across the whole
-request instead of per message, and a queued tool's `input_schema` must be a
-valid Draft 2020-12 object schema.
+A queued tool's `input_schema` must now be a valid Draft 2020-12 object schema,
+rejecting earlier rather than differently.
 
 ## Upgrading from 0.1.0
 

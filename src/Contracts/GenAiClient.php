@@ -54,16 +54,14 @@ interface GenAiClient
     public static function maxUploadedFileBytes(): ?int;
 
     /**
-     * Maximum number of inline blocks of this MIME class the provider accepts,
-     * or null when it documents no such cap.
+     * Maximum number of inline blocks of this MIME class accepted in one message,
+     * or null when the provider documents no such cap.
      *
      * MIME-dependent because providers count documents and images separately —
      * a single scalar could not express "five documents, twenty images".
      *
-     * Providers differ on what the ceiling applies to. Where it bounds the whole
-     * request rather than a single message — Bedrock Converse does — the client
-     * enforces it across every message, which is the stricter reading and never
-     * rejects a request the provider would have accepted.
+     * The ceiling bounds one message, not the whole request: a long history may
+     * legitimately carry more blocks in total than any single turn may hold.
      */
     public static function maxInlineBlocksPerMessage(string $mimeType): ?int;
 

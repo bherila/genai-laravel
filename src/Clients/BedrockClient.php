@@ -104,11 +104,7 @@ class BedrockClient implements GenAiClient, HeartbeatAwareClient
         return null;
     }
 
-    /**
-     * Converse counts documents and images separately: five and twenty. Both
-     * ceilings apply to the whole request, so this client enforces them across
-     * every message rather than one message at a time.
-     */
+    /** Converse counts documents and images separately: five and twenty per message. */
     public static function maxInlineBlocksPerMessage(string $mimeType): ?int
     {
         return isset(self::MIME_TO_IMAGE_FORMAT[$mimeType]) ? 20 : 5;
@@ -400,7 +396,7 @@ class BedrockClient implements GenAiClient, HeartbeatAwareClient
     /** @param  list<array{role: string, content: list<ContentBlock>}>  $messages */
     private function convertMessages(array $messages): array
     {
-        $this->assertBlockCountsWithinRequest($messages);
+        $this->assertBlockCountsPerMessage($messages);
 
         return array_map(fn (array $msg) => [
             'role' => $msg['role'],
@@ -412,25 +408,26 @@ class BedrockClient implements GenAiClient, HeartbeatAwareClient
     }
 
     /**
-     * Documents and images are counted against their own separate caps, across
-     * every message in the request.
+     * Documents and images are counted against their own separate caps, per
+     * message.
      *
-     * Converse applies these ceilings to the complete request, not to each
-     * message, so a conversation whose turns are individually well under the
-     * cap can still exceed it once the history is replayed — and checking one
-     * message at a time passes exactly the request the provider rejects.
+     * Converse documents both ceilings on a single message's content array —
+     * "you can include up to 20 images", "up to five documents" — and
+     * documents no aggregate ceiling for the request, so a long history may
+     * legitimately carry far more than five documents in total. Counting the
+     * whole request instead would refuse conversations the provider accepts.
      *
-     * Counted from the blocks rather than the serialized payload so the request
-     * is refused before any document is converted or sent.
+     * Every message is checked before any of them is converted, so an
+     * offending turn late in the history costs nothing earlier in it.
      *
      * @param  list<array{role: string, content: list<ContentBlock>}>  $messages
      */
-    private function assertBlockCountsWithinRequest(array $messages): void
+    private function assertBlockCountsPerMessage(array $messages): void
     {
-        $documents = 0;
-        $images = 0;
-
         foreach ($messages as $message) {
+            $documents = 0;
+            $images = 0;
+
             foreach ($message['content'] as $block) {
                 if ($block->type !== ContentBlock::TYPE_DOCUMENT) {
                     continue;
@@ -441,10 +438,10 @@ class BedrockClient implements GenAiClient, HeartbeatAwareClient
                     $documents++;
                 }
             }
-        }
 
-        self::assertBlockCount($documents, self::maxInlineBlocksPerMessage('application/pdf'), 'document');
-        self::assertBlockCount($images, self::maxInlineBlocksPerMessage('image/png'), 'image');
+            self::assertBlockCount($documents, self::maxInlineBlocksPerMessage('application/pdf'), 'document');
+            self::assertBlockCount($images, self::maxInlineBlocksPerMessage('image/png'), 'image');
+        }
     }
 
     private static function assertBlockCount(int $actual, ?int $limit, string $kind): void
@@ -454,13 +451,11 @@ class BedrockClient implements GenAiClient, HeartbeatAwareClient
         }
 
         throw new GenAiFatalException(sprintf(
-            'Bedrock Converse accepts at most %d %s blocks per request; this request has %d '
-            .'across its messages. Drop older turns from the history, or merge the %s blocks '
-            .'before sending.',
+            'Bedrock Converse accepts at most %d %s blocks per message; this message has %d. '
+            .'Split them across turns or merge them before sending.',
             $limit,
             $kind,
             $actual,
-            $kind,
         ));
     }
 
