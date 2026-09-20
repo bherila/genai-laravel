@@ -298,6 +298,47 @@ final class McpQueueServiceTest extends TestCase
         ])->assertOk()->assertJsonPath('status', 'completed');
     }
 
+    public function test_rest_receipt_reports_an_empty_tool_input_as_a_json_object(): void
+    {
+        $pending = $this->pendingWithNoArgumentTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $body = ['lease_token' => $claim['request']['lease_token'],
+            'response' => ['tool_calls' => [['name' => 'ping', 'input' => new \stdClass]]]];
+
+        $first = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', $body)->assertOk();
+        $replay = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', $body)->assertOk();
+        $status = $this->getJson('/genai/mcp/v1/requests/'.$pending->id)->assertOk();
+
+        foreach ([$first, $replay] as $response) {
+            $this->assertStringContainsString('"input":{}', $response->getContent());
+        }
+        $this->assertStringContainsString('"input":{}', $status->getContent());
+    }
+
+    public function test_mcp_receipt_reports_an_empty_tool_input_as_a_json_object(): void
+    {
+        $pending = $this->pendingWithNoArgumentTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $arguments = ['request_id' => $pending->id, 'lease_token' => $claim['request']['lease_token'],
+            'response' => ['tool_calls' => [['name' => 'ping', 'input' => new \stdClass]]]];
+
+        $first = $this->mcpToolCall('complete_genai_request', $arguments)->assertOk();
+        $replay = $this->mcpToolCall('complete_genai_request', $arguments)->assertOk();
+
+        // Asserted on the raw body: decoding it here would itself turn the
+        // empty object into an empty list and hide the shape under test.
+        foreach ([$first, $replay] as $response) {
+            $this->assertStringContainsString('"input":{}', $response->getContent());
+        }
+    }
+
+    private function pendingWithNoArgumentTool(): PendingGenAiRequest
+    {
+        return GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('ping', 'No input', Schema::object([]))], ToolChoice::any()))
+            ->prompt('Ping')->enqueue();
+    }
+
     public function test_inline_attachment_is_stored_and_streamed_over_signed_authenticated_rest(): void
     {
         $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))

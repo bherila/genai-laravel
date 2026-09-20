@@ -676,12 +676,35 @@ final readonly class McpQueueService
     {
         $result = $request->result;
         // A result stored before tool-call ids existed still has to satisfy the
-        // receipt schema that now requires them.
+        // receipt schema that now requires them, and a no-argument call has to
+        // regain the object shape its input schema declares.
         if (is_array($result) && ($result['tool_calls'] ?? []) !== []) {
-            $result['tool_calls'] = $this->identifiedToolCalls($request->id, $result['tool_calls']);
+            $result['tool_calls'] = $this->wireToolInputs($this->identifiedToolCalls($request->id, $result['tool_calls']));
         }
 
         return ['request_id' => $request->id, 'status' => 'completed', 'receipt_id' => $request->completion_receipt_id, 'result' => $result];
+    }
+
+    /**
+     * The same restoration for the tool calls of a stored completion, so a
+     * receipt — first answer and idempotent replay alike — reports the empty
+     * input its tool declared rather than the empty list Eloquent read back.
+     *
+     * @param  mixed  $calls
+     * @return mixed
+     */
+    private function wireToolInputs($calls)
+    {
+        if (! is_array($calls)) {
+            return $calls;
+        }
+        foreach ($calls as $index => $call) {
+            if (is_array($call) && ($call['input'] ?? null) === []) {
+                $calls[$index]['input'] = new \stdClass;
+            }
+        }
+
+        return $calls;
     }
 
     /**
