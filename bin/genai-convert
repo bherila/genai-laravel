@@ -1,0 +1,77 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * Runs one document conversion and nothing else.
+ *
+ * This is the body of an isolated conversion: the parent process starts it
+ * under an enforced memory cap and wall-clock timeout, so a decompression bomb
+ * or a pathological parse kills *this* process rather than the worker that
+ * accepted the upload. It reads the document from a file, writes the result to
+ * stdout, and reports failure through its exit code.
+ *
+ * Never invoke this on untrusted input without the limits the parent applies —
+ * on its own it is exactly as exposed as an in-process conversion.
+ */
+
+use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
+use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
+use Bherila\GenAiLaravel\FileConversion\WordDocumentToPdf;
+
+$autoload = null;
+foreach ([__DIR__.'/../../../autoload.php', __DIR__.'/../vendor/autoload.php'] as $candidate) {
+    if (is_file($candidate)) {
+        $autoload = $candidate;
+        break;
+    }
+}
+if ($autoload === null) {
+    fwrite(STDERR, "genai-convert: could not locate the Composer autoloader.\n");
+    exit(2);
+}
+require $autoload;
+
+// argv: converter, input path, mime type, limits as JSON
+if ($argc !== 5) {
+    fwrite(STDERR, "usage: genai-convert <spreadsheet|word> <path> <mime> <limits-json>\n");
+    exit(2);
+}
+[, $converter, $path, $mime, $limitsJson] = $argv;
+
+$contents = @file_get_contents($path);
+if ($contents === false) {
+    fwrite(STDERR, "genai-convert: could not read [{$path}].\n");
+    exit(2);
+}
+
+$decoded = json_decode($limitsJson, true);
+if (! is_array($decoded)) {
+    fwrite(STDERR, "genai-convert: limits must be a JSON object.\n");
+    exit(2);
+}
+$limits = new ConversionLimits(
+    maxInputBytes: (int) ($decoded['maxInputBytes'] ?? 33_554_432),
+    maxOutputBytes: (int) ($decoded['maxOutputBytes'] ?? 33_554_432),
+    maxRowsPerSheet: (int) ($decoded['maxRowsPerSheet'] ?? 100_000),
+    maxCells: (int) ($decoded['maxCells'] ?? 2_000_000),
+    maxSeconds: (float) ($decoded['maxSeconds'] ?? 60.0),
+    maxArchiveEntries: (int) ($decoded['maxArchiveEntries'] ?? 4_096),
+    maxUncompressedBytes: (int) ($decoded['maxUncompressedBytes'] ?? 536_870_912),
+    maxCompressionRatio: (int) ($decoded['maxCompressionRatio'] ?? 200),
+);
+
+try {
+    $result = match ($converter) {
+        'spreadsheet' => SpreadsheetToText::convert(base64_encode($contents), $mime, $limits),
+        'word' => WordDocumentToPdf::convert(base64_encode($contents), $mime, $limits),
+        default => throw new InvalidArgumentException("Unknown converter [{$converter}]."),
+    };
+} catch (Throwable $e) {
+    // Exit 1 is "this document was rejected", which the parent turns back into
+    // the same exception a direct conversion would have thrown.
+    fwrite(STDERR, get_class($e)."\n".$e->getMessage());
+    exit(1);
+}
+
+fwrite(STDOUT, $result);
+exit(0);

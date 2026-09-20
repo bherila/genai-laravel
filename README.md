@@ -598,18 +598,56 @@ output, or time ceiling, and marks the cut with a `=== Truncated: … ===` line.
 Word conversion throws when it outruns its budget, since a half-rendered PDF is
 no use to anyone.
 
-> **These limits are not a sandbox.** They bound the accidental cases — a
+> **These limits alone are not a sandbox.** They bound the accidental cases — a
 > 400,000-row export, a sheet with one cell at XFD1048576, a conversion that
-> would otherwise pin a worker. They are not a defence against a hostile file.
-> XLSX and DOCX are ZIP containers, and only `maxInputBytes` is checked before
-> the bytes reach PhpSpreadsheet or PhpWord: both libraries materialise the
-> archive in-process, so a decompression bomb sized just under that limit can
-> still exhaust memory, and neither can be interrupted once it starts. If you
-> convert documents from people you do not trust, run the conversion in a
-> separate process with an enforced memory cap and CPU limit — a dedicated queue
-> worker with a low `memory_limit`, a container with `--memory`, a `ulimit -v`
-> wrapper — and treat a killed process as a rejected upload. Tighten
-> `ConversionLimits` as a first filter on top of that, not in place of it.
+> would otherwise pin a worker — and they are checked while walking a workbook
+> the parser has already opened. Two things now happen before that: the row and
+> cell ceilings are applied at load, so they bound what is *read* rather than
+> what is rendered, and a ZIP container is refused up front if its own central
+> directory declares more than `maxArchiveEntries`, `maxUncompressedBytes` or
+> `maxCompressionRatio` allow. That stops a decompression bomb, which nothing
+> here used to.
+>
+> It is still a filter rather than a boundary: a parser can be pathological on
+> input that declares nothing unusual, and neither PhpSpreadsheet nor PhpWord
+> can be interrupted mid-parse. For documents from people you do not trust, use
+> `IsolatedConverter` below.
+
+### Converting untrusted uploads
+
+`IsolatedConverter` runs a conversion in a child process under a memory cap the
+kernel enforces and a hard wall-clock limit. A child that is killed is reported
+as a **rejected upload** — your worker is untouched and keeps serving.
+
+```php
+use Bherila\GenAiLaravel\FileConversion\IsolatedConverter;
+
+if (! IsolatedConverter::isSupported()) {
+    // No PHP CLI binary, no POSIX shell, or Windows: the guarantee is not
+    // available here. Refuse the upload, or convert in-process knowingly.
+    abort(503, 'Document conversion is unavailable on this host.');
+}
+
+$text = (new IsolatedConverter(limits: $limits, memoryLimitBytes: 512 * 1024 * 1024))
+    ->spreadsheetToText($base64, $mime);
+```
+
+It throws `GenAiFileTooLargeException` when the document exhausts the limits and
+`GenAiFatalException` when it cannot be converted at all — the same exceptions
+the in-process converters raise, so it is a drop-in for them.
+
+Two deliberate properties:
+
+- **It is opt-in.** The in-process converters stay the default, because
+  isolation has its own failure modes: a missing binary, a container without the
+  right limits, a host where `ulimit` does nothing.
+- **It fails loudly.** Where it cannot enforce isolation it throws rather than
+  quietly running in-process, which would hand back the exact property you chose
+  it for. Check `isSupported()` if you need to decide at runtime.
+
+Requires `symfony/process` (`composer require symfony/process`) and a POSIX
+host. Windows cannot enforce the address-space cap, so `isSupported()` is false
+there.
 
 Bedrock natively accepts the Office formats via its own `document` block (the
 Converse API lists `pdf, csv, doc, docx, xls, xlsx, html, txt, md` as native

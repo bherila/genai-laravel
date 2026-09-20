@@ -2,7 +2,16 @@
     "name": "bherila/genai-laravel",
     "description": "Provider-agnostic GenAI client for Laravel: Gemini, AWS Bedrock, and more",
     "type": "library",
-    "keywords": ["laravel", "gemini", "bedrock", "anthropic", "mcp", "ai", "genai", "llm"],
+    "keywords": [
+        "laravel",
+        "gemini",
+        "bedrock",
+        "anthropic",
+        "mcp",
+        "ai",
+        "genai",
+        "llm"
+    ],
     "license": "MIT",
     "authors": [
         {
@@ -35,7 +44,8 @@
         "dompdf/dompdf": "Required together with phpoffice/phpword to render DOC / DOCX / ODT / RTF to PDF before sending — preserves formatting and lets providers use their native PDF pipelines (Gemini vision, Anthropic document blocks). Not loaded if absent.",
         "phpoffice/phpspreadsheet": "Enables automatic XLSX / XLS / ODS / CSV → plain-text conversion when sending spreadsheet files to Anthropic or Gemini (^4|^5). Not loaded if absent.",
         "phpoffice/phpword": "Enables automatic DOC / DOCX / ODT / RTF → PDF conversion (when dompdf/dompdf is also installed) before sending to Anthropic or Gemini. Not loaded if absent.",
-        "sentry/sentry": "Enables optional Sentry AI monitoring instrumentation when using a Sentry PHP SDK version that supports SpanContext::make (^4.23)."
+        "sentry/sentry": "Enables optional Sentry AI monitoring instrumentation when using a Sentry PHP SDK version that supports SpanContext::make (^4.23).",
+        "symfony/process": "Enables IsolatedConverter, which runs Office-document conversion in a child process under an enforced memory cap and wall-clock limit — the only way this package can bound a hostile upload. Not loaded if absent."
     },
     "autoload": {
         "psr-4": {
