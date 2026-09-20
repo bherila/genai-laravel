@@ -131,6 +131,13 @@ final class WordDocumentToPdf
         }
 
         $readerName = self::readerNameForMime($mimeType);
+        // DOCX and ODT are ZIP containers, and PhpWord materialises their
+        // contents before any ceiling here can run. The archive's own central
+        // directory is the only thing that can refuse a bomb in time. A legacy
+        // .doc or .rtf is not an archive, so unreadable bounds mean "not
+        // applicable" rather than "unsafe".
+        $limits->assertArchiveWithinBounds(ZipBounds::read($bytes), 'document');
+
         $inputTmp = tempnam(sys_get_temp_dir(), 'genai_word_');
         $outputTmp = tempnam(sys_get_temp_dir(), 'genai_pdf_');
         if ($inputTmp === false || $outputTmp === false) {
