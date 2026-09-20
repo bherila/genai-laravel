@@ -418,6 +418,16 @@ final class McpQueueServiceTest extends TestCase
         $this->assertSame(McpRequestStatus::Leased, $pending->status());
     }
 
+    public function test_enqueue_rejects_a_structurally_invalid_tool_schema(): void
+    {
+        $this->expectException(McpQueueException::class);
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('extract', 'Extract', Schema::fromArray([
+                'type' => 'object', 'required' => 'amount',
+            ]))], ToolChoice::any()))
+            ->prompt('Read it')->enqueue();
+    }
+
     public function test_auto_submission_requires_nonempty_text_or_a_defined_tool_call(): void
     {
         $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))->prompt('Answer')->enqueue();
