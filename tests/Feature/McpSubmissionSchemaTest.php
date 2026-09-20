@@ -55,6 +55,28 @@ final class McpSubmissionSchemaTest extends TestCase
         }
     }
 
+    public function test_non_object_input_schemas_are_rejected(): void
+    {
+        $invalid = [
+            'string' => ['type' => 'string'],
+            'number' => ['type' => 'number'],
+            'boolean' => ['type' => 'boolean'],
+            'array' => ['type' => 'array', 'items' => ['type' => 'string']],
+            'null' => ['type' => 'null'],
+            'union including object' => ['type' => ['object', 'null']],
+            'no type at all' => ['description' => 'anything goes'],
+        ];
+
+        foreach ($invalid as $label => $schema) {
+            try {
+                $this->schemas()->assertPortable(Schema::fromArray($schema)->jsonSerialize());
+                $this->fail("Expected the [{$label}] input schema to be rejected.");
+            } catch (McpQueueException $exception) {
+                $this->assertSame(422, $exception->httpStatus, $label);
+            }
+        }
+    }
+
     public function test_references_are_still_rejected_before_anything_is_resolved(): void
     {
         $this->expectException(McpQueueException::class);

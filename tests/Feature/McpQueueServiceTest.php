@@ -428,6 +428,28 @@ final class McpQueueServiceTest extends TestCase
             ->prompt('Read it')->enqueue();
     }
 
+    public function test_enqueue_rejects_a_scalar_tool_input_schema(): void
+    {
+        $this->expectException(McpQueueException::class);
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('echo', 'Echo', Schema::string('Anything'))], ToolChoice::any()))
+            ->prompt('Read it')->enqueue();
+    }
+
+    public function test_a_rejected_tool_schema_never_reaches_the_queue(): void
+    {
+        try {
+            GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+                ->tools(new ToolConfig([new ToolDefinition('echo', 'Echo', Schema::arrayOf(Schema::string()))], ToolChoice::any()))
+                ->prompt('Read it')->enqueue();
+            $this->fail('Expected the list-shaped tool input schema to be rejected.');
+        } catch (McpQueueException $exception) {
+            $this->assertSame(422, $exception->httpStatus);
+        }
+
+        $this->assertDatabaseCount('genai_mcp_requests', 0);
+    }
+
     public function test_auto_submission_requires_nonempty_text_or_a_defined_tool_call(): void
     {
         $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))->prompt('Answer')->enqueue();

@@ -96,6 +96,26 @@ final class SubmissionSchema
     {
         $this->assertNoReferences($schema);
         $this->assertWellFormed(json_encode($schema, JSON_THROW_ON_ERROR));
+        $this->assertObjectShaped($schema);
+    }
+
+    /**
+     * A queued tool call carries its arguments as a JSON object, and so does
+     * the `GenAiResponse` a completion is turned back into. A scalar or list
+     * input schema is legal JSON Schema but has nowhere to live in either, so
+     * accepting one at enqueue means the completion validates against a schema
+     * whose values then break assistantMessage(). Refuse it while the caller
+     * is still there to hear about it.
+     *
+     * @param  array<string, mixed>  $schema
+     */
+    private function assertObjectShaped(array $schema): void
+    {
+        $type = $schema['type'] ?? null;
+        $types = is_array($type) ? $type : [$type];
+        if ($types !== ['object']) {
+            throw new McpQueueException('Tool input schemas must declare an object type for queued execution.', 422);
+        }
     }
 
     /**
