@@ -655,6 +655,15 @@ opaque host references while rechecking current domain authorization. Bytes are
 streamed by authenticated REST and are never put in MCP tool content or request
 JSON. Package pruning deletes only package-owned copies, never host evidence.
 
+Tearing a mailbox down goes through `McpQueueService::purgeMailbox($mailbox)`,
+which takes a model or an id. Deleting the row cascades its requests and
+attachments away, and those rows are the only record of what the package wrote
+to disk, so the mailbox is closed to new work, its package-owned bytes are
+deleted, and only then are the rows removed. A storage failure aborts with every
+row intact, leaving the teardown to be retried rather than stranding the bytes.
+Host-owned attachments are untouched. Deleting a mailbox through Eloquent
+(`$mailbox->delete()`) runs the same cleanup, so there is no unsafe path.
+
 ### Install and authenticate
 
 Run the package migrations (or publish them first with

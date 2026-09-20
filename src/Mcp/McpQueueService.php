@@ -434,6 +434,56 @@ final readonly class McpQueueService
         return $this->authorizedRequest($context, $requestId, $ability, false);
     }
 
+    /**
+     * The supported way to tear a mailbox down. The caller is responsible for
+     * authorizing its own mailbox/domain job, as with cancellation.
+     *
+     * Removing the row cascades its requests and attachments away, and those
+     * rows are the only record of the objects this package wrote to disk, so
+     * the owned bytes go first. Host-owned attachments are left alone: the
+     * package holds an opaque reference to those and the host still owns the
+     * evidence behind it.
+     */
+    public function purgeMailbox(McpMailbox|string $mailbox): void
+    {
+        $mailbox = is_string($mailbox) ? McpMailbox::query()->findOrFail($mailbox) : $mailbox;
+        $mailbox->delete();
+    }
+
+    /**
+     * Delete every object this package wrote to disk for a mailbox.
+     *
+     * The mailbox is disabled first so nothing new is enqueued into it while
+     * its bytes are being removed. A storage failure throws with every row
+     * still in place, so a transient error leaves a retryable teardown rather
+     * than bytes no row points at any more. Called for you when a mailbox is
+     * deleted through Eloquent; call it directly to clear the bytes without
+     * removing the mailbox.
+     */
+    public function discardOwnedObjects(McpMailbox $mailbox): void
+    {
+        $this->db->connection()->transaction(function () use ($mailbox): void {
+            $locked = McpMailbox::query()->lockForUpdate()->find($mailbox->id);
+            if ($locked !== null && $locked->enabled) {
+                $locked->forceFill(['enabled' => false])->save();
+            }
+        });
+
+        McpAttachment::query()
+            ->where('package_owned', true)->whereNotNull('disk')->whereNotNull('path')
+            ->whereIn('request_id', McpRequest::query()->select('id')->where('mailbox_id', $mailbox->id))
+            ->eachById(function (McpAttachment $attachment): void {
+                try {
+                    $deleted = Storage::disk((string) $attachment->disk)->delete((string) $attachment->path);
+                } catch (Throwable $exception) {
+                    throw new McpQueueException('Mailbox storage could not be cleared: '.$exception->getMessage(), 503);
+                }
+                if (! $deleted) {
+                    throw new McpQueueException('Mailbox storage could not be cleared.', 503);
+                }
+            });
+    }
+
     /** Producer-side cancellation. The caller is responsible for authorizing its mailbox/domain job. */
     public function cancel(McpRequest|string $request): McpRequest
     {

@@ -17,6 +17,7 @@ use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\McpClientFactory;
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
 use Bherila\GenAiLaravel\Mcp\McpTokenService;
+use Bherila\GenAiLaravel\Mcp\Models\McpAttachment;
 use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
@@ -56,7 +57,7 @@ final class McpQueueServiceTest extends TestCase
     protected function defineEnvironment($app): void
     {
         $app['config']->set('database.default', 'testing');
-        $app['config']->set('database.connections.testing', ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => '']);
+        $app['config']->set('database.connections.testing', ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => '', 'foreign_key_constraints' => true]);
         $app['config']->set('app.key', 'base64:'.base64_encode(str_repeat('x', 32)));
         $app['config']->set('genai.mcp.enabled', true);
         $app['config']->set('genai.mcp.rest.enabled', true);
@@ -249,6 +250,83 @@ final class McpQueueServiceTest extends TestCase
         $this->assertSame(McpRequestStatus::Pending, McpRequest::query()->findOrFail($pending->id)->status);
     }
 
+    public function test_deleting_a_mailbox_removes_package_owned_bytes_and_rows(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+        $path = (string) McpAttachment::query()->where('request_id', $pending->id)->firstOrFail()->path;
+        Storage::disk('local')->assertExists($path);
+
+        $this->app->make(McpQueueService::class)->purgeMailbox($mailbox->id);
+
+        Storage::disk('local')->assertMissing($path);
+        $this->assertDatabaseMissing('genai_mcp_mailboxes', ['id' => $mailbox->id]);
+        $this->assertDatabaseCount('genai_mcp_requests', 0);
+        $this->assertDatabaseCount('genai_mcp_attachments', 0);
+    }
+
+    public function test_deleting_a_mailbox_leaves_host_owned_attachments_to_the_host(): void
+    {
+        $mailbox = $this->mailbox();
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->withStoredAttachment(new StoredAttachment('report.pdf', 'application/pdf', 12, str_repeat('a', 64), hostReference: 'document:7'))
+            ->prompt('Read it')->enqueue();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldNotReceive('delete');
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $this->app->make(McpQueueService::class)->purgeMailbox($mailbox);
+
+        $this->assertDatabaseMissing('genai_mcp_mailboxes', ['id' => $mailbox->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 0);
+    }
+
+    public function test_mailbox_teardown_keeps_every_row_when_storage_cannot_be_cleared(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldReceive('delete')->once()->andReturnFalse();
+        Storage::shouldReceive('disk')->with('local')->andReturn($disk);
+
+        try {
+            $this->app->make(McpQueueService::class)->purgeMailbox($mailbox);
+            $this->fail('Expected the failed storage delete to abort mailbox teardown.');
+        } catch (McpQueueException $exception) {
+            $this->assertSame(503, $exception->httpStatus);
+        }
+
+        $this->assertDatabaseHas('genai_mcp_mailboxes', ['id' => $mailbox->id]);
+        $this->assertDatabaseHas('genai_mcp_requests', ['id' => $pending->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 1);
+    }
+
+    public function test_mailbox_teardown_closes_the_mailbox_to_new_work_first(): void
+    {
+        $mailbox = $this->mailbox();
+        $client = $this->app->make(McpClientFactory::class)->forMailbox($mailbox);
+        GenAiRequest::with($client)->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldReceive('delete')->once()->andReturnFalse();
+        $disk->shouldReceive('deleteDirectory')->andReturnTrue();
+        Storage::shouldReceive('disk')->with('local')->andReturn($disk);
+
+        try {
+            $this->app->make(McpQueueService::class)->purgeMailbox($mailbox);
+        } catch (McpQueueException) {
+            // The aborted teardown is the point: the mailbox must stay closed.
+        }
+
+        $this->assertFalse(McpMailbox::query()->findOrFail($mailbox->id)->enabled);
+        $this->expectException(McpQueueException::class);
+        GenAiRequest::with($client)->prompt('Too late')->enqueue();
+    }
+
     public function test_prune_keeps_request_metadata_when_owned_deletion_fails_then_retries(): void
     {
         $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
@@ -269,6 +347,7 @@ final class McpQueueServiceTest extends TestCase
 
         $this->artisan('genai:mcp:prune')->assertSuccessful();
         $this->assertDatabaseMissing('genai_mcp_requests', ['id' => $pending->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 0);
     }
 
     public function test_prune_keeps_request_metadata_when_owned_deletion_throws(): void
