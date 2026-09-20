@@ -640,6 +640,45 @@ final class McpQueueServiceTest extends TestCase
         $this->assertSame($first->id, $second->id);
     }
 
+    public function test_enqueue_options_without_an_override_follow_configured_max_attempts(): void
+    {
+        config(['genai.mcp.max_attempts' => 7]);
+
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue(new EnqueueOptions(queue: 'invoices', priority: 5));
+
+        $this->assertSame(7, McpRequest::query()->findOrFail($pending->id)->max_attempts);
+    }
+
+    public function test_enqueue_without_options_follows_configured_max_attempts(): void
+    {
+        config(['genai.mcp.max_attempts' => 9]);
+
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue();
+
+        $this->assertSame(9, McpRequest::query()->findOrFail($pending->id)->max_attempts);
+    }
+
+    public function test_explicit_max_attempts_override_wins_over_configuration(): void
+    {
+        config(['genai.mcp.max_attempts' => 7]);
+
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue(new EnqueueOptions(maxAttempts: 2));
+
+        $this->assertSame(2, McpRequest::query()->findOrFail($pending->id)->max_attempts);
+    }
+
+    public function test_configured_max_attempts_outside_the_supported_range_is_rejected(): void
+    {
+        config(['genai.mcp.max_attempts' => 0]);
+
+        $this->expectException(McpQueueException::class);
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue();
+    }
+
     private function pendingWithNestedObjectTool(): PendingGenAiRequest
     {
         return GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))

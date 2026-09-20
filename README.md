@@ -642,6 +642,11 @@ $pending->status();
 $pending->response(); // null until completed, then a normal GenAiResponse
 ```
 
+Every `EnqueueOptions` field is an override of a default, so an options object
+set for the queue, priority, schedule, metadata or idempotency key changes
+nothing else. `maxAttempts` left unset follows `GENAI_MCP_MAX_ATTEMPTS`; pass an
+explicit value only to pin one request's attempt ceiling.
+
 Provider file references are rejected because a user's independent client
 cannot dereference them. Existing inline base64 blocks are accepted only within
 configured limits, decoded once, and moved to package-owned storage. For large

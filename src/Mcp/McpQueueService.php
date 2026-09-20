@@ -41,7 +41,8 @@ final readonly class McpQueueService
         if (! $mailbox->enabled) {
             throw new McpQueueException('Mailbox is disabled.', 409);
         }
-        $options ??= new EnqueueOptions(maxAttempts: (int) config('genai.mcp.max_attempts', 3));
+        $options ??= new EnqueueOptions;
+        $maxAttempts = $options->maxAttempts ?? (int) config('genai.mcp.max_attempts', 3);
         if (! preg_match('/^[A-Za-z0-9._-]{1,80}$/', $options->queue)) {
             throw new McpQueueException('Queue name is invalid.', 422);
         }
@@ -51,7 +52,7 @@ final readonly class McpQueueService
         if ($options->priority < -2147483648 || $options->priority > 2147483647) {
             throw new McpQueueException('Priority is outside the supported integer range.', 422);
         }
-        if ($options->maxAttempts < 1 || $options->maxAttempts > 100) {
+        if ($maxAttempts < 1 || $maxAttempts > 100) {
             throw new McpQueueException('maxAttempts must be between 1 and 100.', 422);
         }
         if ($options->expiresAt !== null && $options->expiresAt <= ($options->availableAt ?? now())) {
@@ -66,7 +67,7 @@ final readonly class McpQueueService
         $work = [
             'payload' => $raw, 'queue' => $options->queue, 'priority' => $options->priority,
             'available_at' => $options->availableAt?->format(DATE_ATOM), 'expires_at' => $options->expiresAt?->format(DATE_ATOM),
-            'max_attempts' => $options->maxAttempts, 'metadata' => $options->metadata,
+            'max_attempts' => $maxAttempts, 'metadata' => $options->metadata,
         ];
         $enqueueHash = hash('sha256', $this->canonicalJson($work));
         // Work enqueued before nested objects were canonicalized carries the
@@ -76,7 +77,7 @@ final readonly class McpQueueService
 
         $requestId = (string) Str::uuid();
         try {
-            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $enqueueHash, $enqueueHashes, $requestId): McpRequest {
+            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $maxAttempts, $enqueueHash, $enqueueHashes, $requestId): McpRequest {
                 $mailbox = McpMailbox::query()->lockForUpdate()->find($mailbox->id);
                 if ($mailbox === null) {
                     throw new McpQueueException('Mailbox not found.', 404);
@@ -103,7 +104,7 @@ final readonly class McpQueueService
                     'idempotency_key' => $options->idempotencyKey,
                     'enqueue_hash' => $enqueueHash,
                     'available_at' => $options->availableAt ?? now(), 'expires_at' => $options->expiresAt,
-                    'max_attempts' => $options->maxAttempts,
+                    'max_attempts' => $maxAttempts,
                 ]);
                 $request->payload = $this->materializeAttachments($request, $raw);
                 $request->save();
