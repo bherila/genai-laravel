@@ -123,20 +123,20 @@ use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
 
-$toolConfig = new ToolConfig(
-    tools: [
-        new ToolDefinition(
-            name: 'extract_invoice',
-            description: 'Extract invoice fields',
-            inputSchema: Schema::object([
-                'vendor'  => Schema::string('Vendor name'),
-                'amount'  => Schema::number('Total amount due'),
-                'due_date' => Schema::string('Due date in YYYY-MM-DD'),
-            ], required: ['vendor', 'amount']),
-        ),
-    ],
-    choice: ToolChoice::any(),
-);
+$tools = [
+    new ToolDefinition(
+        name: 'extract_invoice',
+        description: 'Extract invoice fields',
+        inputSchema: Schema::object([
+            'vendor'  => Schema::string('Vendor name'),
+            'amount'  => Schema::number('Total amount due'),
+            'due_date' => Schema::string('Due date in YYYY-MM-DD'),
+        ], required: ['vendor', 'amount']),
+    ),
+];
+
+// One extraction and nothing after it, so forcing the call is the whole job.
+$toolConfig = new ToolConfig(tools: $tools, choice: ToolChoice::any());
 
 $response = GenAiRequest::with($client)
     ->withFile($base64, 'application/pdf')
@@ -158,14 +158,16 @@ and a neutral way to express the result. All three are provider-agnostic:
 ```php
 $messages = [['role' => 'user', 'content' => [ContentBlock::text($prompt)]]];
 
-// Note the parameter: an arrow function captures by value at definition, so a
-// closure over $messages would resend the first turn forever.
-$ask = static fn (array $history) => GenAiRequest::with($client)
+// Note the parameters: an arrow function captures by value at definition, so a
+// closure over $messages would resend the first turn forever. The choice is a
+// parameter too, because it is not the same in both phases.
+$ask = static fn (array $history, ToolChoice $choice) => GenAiRequest::with($client)
     ->messages($history)
-    ->tools($toolConfig)
+    ->tools(new ToolConfig($tools, $choice))
     ->generate();
 
-$response = $ask($messages);
+// Force the opening call, so the first turn is a tool call rather than a guess.
+$response = $ask($messages, ToolChoice::any());
 
 while ($response->hasToolCalls()) {
     $messages[] = $response->assistantMessage();
@@ -176,11 +178,21 @@ while ($response->hasToolCalls()) {
     }
 
     $messages[] = ['role' => 'user', 'content' => $results];
-    $response = $ask($messages);
+    // From here the model has to be free to answer: `any()` demands another
+    // tool call after every result, so the loop would never reach its text.
+    $response = $ask($messages, ToolChoice::auto());
 }
 
 echo $response->text;
 ```
+
+The choice changes between the two phases and that is the whole point of
+passing it in. `ToolChoice::any()` means *call a tool*, which is what you want
+for the opening turn; leaving it in place after a tool result means the model
+must call another tool, and another, and the `while` never exits. `auto()`
+after results lets the model stop when it has enough to answer. Where the tools
+are declared once as a `ToolConfig`, build a second one for the loop rather
+than reusing the forcing configuration.
 
 `ContentBlock::toolResultFor()` carries both the call ID and the function name,
 because Anthropic and Bedrock correlate results by ID while Gemini correlates by

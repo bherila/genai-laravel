@@ -10,6 +10,10 @@ use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\GenAiRequest;
 use Bherila\GenAiLaravel\GenAiResponse;
+use Bherila\GenAiLaravel\Schema;
+use Bherila\GenAiLaravel\ToolChoice;
+use Bherila\GenAiLaravel\ToolConfig;
+use Bherila\GenAiLaravel\ToolDefinition;
 use Bherila\GenAiLaravel\Usage;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
@@ -202,6 +206,99 @@ class ToolLoopTest extends TestCase
             $block = $req->data()['messages'][0]['content'][0] ?? [];
 
             return ($block['toolResult']['content'][0]['text'] ?? '') === 'sunny';
+        });
+    }
+
+    // ── the documented loop terminates ──────────────────────────────────────
+
+    /**
+     * The loop from the README's "Completing the loop" section, run verbatim
+     * against a provider that honours the contract `any()` states: a forced
+     * turn owes a tool call. Keep the two in step — this is what proves the
+     * documented loop is internally consistent.
+     *
+     * Reusing one forcing ToolChoice for every iteration — as the example used
+     * to — therefore owes another tool call after every result, and the loop
+     * can never reach the final text it advertises. Forcing only the opening
+     * turn is what lets it finish.
+     */
+    public function test_the_documented_tool_loop_reaches_a_final_text_response(): void
+    {
+        $choices = [];
+        $this->fakeProviderHonouringToolChoice($choices);
+
+        $client = new AnthropicClient(apiKey: 'k');
+        $tools = [new ToolDefinition('get_weather', 'Current weather', Schema::object(['city' => Schema::string()], ['city']))];
+        $messages = [['role' => 'user', 'content' => [ContentBlock::text('Weather in Boston?')]]];
+
+        $ask = static fn (array $history, ToolChoice $choice) => GenAiRequest::with($client)
+            ->messages($history)
+            ->tools(new ToolConfig($tools, $choice))
+            ->generate();
+
+        $response = $ask($messages, ToolChoice::any());
+
+        $iterations = 0;
+        while ($response->hasToolCalls()) {
+            $this->assertLessThan(5, ++$iterations, 'The documented loop never reached a final text response.');
+            $messages[] = $response->assistantMessage();
+
+            $results = [];
+            foreach ($response->toolCalls as $call) {
+                $results[] = ContentBlock::toolResultFor($call, ['temp_c' => 12]);
+            }
+
+            $messages[] = ['role' => 'user', 'content' => $results];
+            $response = $ask($messages, ToolChoice::auto());
+        }
+
+        $this->assertSame(1, $iterations);
+        $this->assertSame('It is 12°C in Boston.', $response->text);
+        $this->assertSame(['any', 'auto'], $choices, 'Only the opening turn should force a tool call.');
+    }
+
+    /**
+     * The same loop with the forcing choice left in place, which is what the
+     * example used to do. It cannot terminate, so the guard is the assertion.
+     */
+    public function test_reusing_a_forcing_tool_choice_never_reaches_final_text(): void
+    {
+        $choices = [];
+        $this->fakeProviderHonouringToolChoice($choices);
+
+        $client = new AnthropicClient(apiKey: 'k');
+        $tools = [new ToolDefinition('get_weather', 'Current weather', Schema::object(['city' => Schema::string()], ['city']))];
+        $messages = [['role' => 'user', 'content' => [ContentBlock::text('Weather in Boston?')]]];
+        $forcing = new ToolConfig($tools, ToolChoice::any());
+
+        $response = GenAiRequest::with($client)->messages($messages)->tools($forcing)->generate();
+        for ($iteration = 0; $iteration < 4 && $response->hasToolCalls(); $iteration++) {
+            $messages[] = $response->assistantMessage();
+            $messages[] = ['role' => 'user', 'content' => [ContentBlock::toolResultFor($response->toolCalls[0], ['temp_c' => 12])]];
+            $response = GenAiRequest::with($client)->messages($messages)->tools($forcing)->generate();
+        }
+
+        $this->assertTrue($response->hasToolCalls());
+        $this->assertSame('', $response->text);
+    }
+
+    /**
+     * Anthropic and Bedrock both treat `any` as an obligation rather than a
+     * hint, so a fake that always answers with text cannot show the difference
+     * between the two loops.
+     *
+     * @param  list<string|null>  $choices  Records what each turn asked for.
+     */
+    private function fakeProviderHonouringToolChoice(array &$choices): void
+    {
+        $call = 0;
+        Http::fake(function (Request $request) use (&$choices, &$call) {
+            $choice = $request->data()['tool_choice']['type'] ?? 'auto';
+            $choices[] = $choice;
+
+            return Http::response($choice === 'auto'
+                ? ['content' => [['type' => 'text', 'text' => 'It is 12°C in Boston.']], 'usage' => ['input_tokens' => 1, 'output_tokens' => 1]]
+                : ['content' => [['type' => 'tool_use', 'id' => 'call_'.++$call, 'name' => 'get_weather', 'input' => ['city' => 'Boston']]], 'usage' => ['input_tokens' => 1, 'output_tokens' => 1]]);
         });
     }
 
