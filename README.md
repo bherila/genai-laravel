@@ -548,10 +548,25 @@ three separate questions rather than one number:
 ```php
 $client::maxInlineFileBytes('application/pdf'); // decoded bytes for one inline block
 $client::maxUploadedFileBytes();                // decoded bytes via the File API, null when there is none
-$client::maxInlineBlocksPerMessage($mime);      // blocks of that kind per message, null when uncapped
+$client::maxInlineBlocksPerMessage($mime);      // blocks of that kind, null when uncapped
 $client::maxRequestBytes();                    // whole serialized request, null when uncapped
 $client::supportsFileApi();                     // whether uploadFile() will work at all
 ```
+
+Where a provider applies its block ceiling to the whole request rather than to
+one message — Bedrock Converse does, at five documents and twenty images — the
+client counts every message against it. A history whose turns are each under the
+cap can still exceed it once replayed, and it is refused before any document is
+converted or sent.
+
+A spreadsheet that has to be extracted to text shares that request budget with
+the prompt, the history and the tools, so the extract is bounded by what they
+leave rather than by the standalone conversion ceiling — which on Gemini is
+larger than the whole request. An oversized workbook therefore arrives
+truncated, with the marker saying where extraction stopped, instead of being
+built in full and then rejected. The accounting is deliberately conservative, so
+a very large extract may be cut shorter than strictly necessary; lower
+`max_output_bytes` if you would rather choose the size yourself.
 
 Per-file limits are expressed in **decoded** bytes; `maxRequestBytes()` measures
 the finished serialized payload, because a file can sit under its own limit and
@@ -848,6 +863,21 @@ repository because no user account credentials are available to its test suite.
 | Office-format documents | auto-convert 📄📊 | ✅ native | auto-convert 📄📊 |
 | Auto DOC/DOCX → PDF (with phpword + dompdf) | ✅ | n/a | ✅ |
 | Auto XLSX/XLS/ODS/CSV → text (with phpspreadsheet) | ✅ | n/a | ✅ |
+
+## Upgrading from 0.2.x
+
+`EnqueueOptions::$maxAttempts` is now `?int` and defaults to `null`, meaning
+"no per-request override" rather than "three attempts". An omitted value is
+resolved from `GENAI_MCP_MAX_ATTEMPTS` at enqueue, so an options object built to
+set a queue or a priority no longer pins the attempt ceiling to 3 behind your
+back. Passing an explicit number still wins. Reading the property back can now
+return `null`, so code that did arithmetic on `$options->maxAttempts` needs to
+resolve it first.
+
+Two limits also got stricter, both rejecting earlier rather than differently:
+Bedrock counts its five-document and twenty-image ceilings across the whole
+request instead of per message, and a queued tool's `input_schema` must be a
+valid Draft 2020-12 object schema.
 
 ## Upgrading from 0.1.0
 

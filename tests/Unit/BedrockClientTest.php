@@ -458,4 +458,105 @@ class BedrockClientTest extends TestCase
         $response = ['output' => ['message' => ['content' => [['text' => 'no tools here']]]]];
         $this->assertSame([], $this->makeClient()->extractToolCalls($response));
     }
+
+    // ── inline block ceilings apply to the whole request ─────────────────────
+
+    /**
+     * Converse caps documents and images for the complete request. A history
+     * whose turns are each comfortably under the cap can still blow it once
+     * replayed, and checking a message at a time passes exactly the request
+     * the provider then rejects.
+     */
+    public function test_documents_are_counted_across_every_message_not_per_message(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
+
+        // Six documents, three per message: under the cap of five per message,
+        // over it for the request.
+        $messages = [
+            ['role' => 'user', 'content' => $this->documents(3, 'application/pdf')],
+            ['role' => 'user', 'content' => $this->documents(3, 'application/pdf')],
+        ];
+
+        try {
+            $this->makeClient()->converse('', $messages);
+            $this->fail('Expected the aggregate document ceiling to be enforced.');
+        } catch (GenAiFatalException $e) {
+            $this->assertStringContainsString('at most 5 document blocks per request', $e->getMessage());
+            $this->assertStringContainsString('this request has 6', $e->getMessage());
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_images_are_counted_across_every_message_not_per_message(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
+
+        $messages = [
+            ['role' => 'user', 'content' => $this->documents(11, 'image/png')],
+            ['role' => 'user', 'content' => $this->documents(10, 'image/png')],
+        ];
+
+        try {
+            $this->makeClient()->converse('', $messages);
+            $this->fail('Expected the aggregate image ceiling to be enforced.');
+        } catch (GenAiFatalException $e) {
+            $this->assertStringContainsString('at most 20 image blocks per request', $e->getMessage());
+            $this->assertStringContainsString('this request has 21', $e->getMessage());
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_a_request_exactly_on_both_ceilings_is_accepted(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
+
+        $this->makeClient()->converse('', [
+            ['role' => 'user', 'content' => $this->documents(3, 'application/pdf')],
+            ['role' => 'user', 'content' => $this->documents(2, 'application/pdf')],
+            ['role' => 'user', 'content' => $this->documents(20, 'image/png')],
+        ]);
+
+        Http::assertSentCount(1);
+    }
+
+    /** Documents and images have their own budgets; a full one does not spend the other. */
+    public function test_the_two_ceilings_are_counted_separately(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
+
+        $this->makeClient()->converse('', [
+            ['role' => 'user', 'content' => [
+                ...$this->documents(5, 'application/pdf'),
+                ...$this->documents(20, 'image/png'),
+            ]],
+        ]);
+
+        Http::assertSentCount(1);
+    }
+
+    public function test_the_aggregate_ceiling_is_enforced_before_anything_is_sent(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
+
+        $messages = array_fill(0, 6, ['role' => 'user', 'content' => $this->documents(1, 'application/pdf')]);
+
+        $this->expectException(GenAiFatalException::class);
+        try {
+            $this->makeClient()->converse('', $messages);
+        } finally {
+            Http::assertNothingSent();
+        }
+    }
+
+    /** @return list<ContentBlock> */
+    private function documents(int $count, string $mimeType): array
+    {
+        return array_map(
+            static fn (int $i): ContentBlock => ContentBlock::document(base64_encode('bytes-'.$i), $mimeType, 'doc-'.$i),
+            range(1, $count),
+        );
+    }
 }

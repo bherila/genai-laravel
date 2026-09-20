@@ -252,8 +252,14 @@ class GeminiClient implements GenAiClient, HeartbeatAwareClient
             && SpreadsheetToText::supports($mimeType)
             && SpreadsheetToText::isAvailable()
         ) {
-            // Spreadsheet fallback: extract cell data to text rather than fail.
-            $extracted = SpreadsheetToText::convert($fileBytes, $mimeType, $this->conversionLimits);
+            // Spreadsheet fallback: extract cell data to text rather than fail,
+            // within whatever the prompt, system text and tools leave of the
+            // request budget.
+            $extracted = SpreadsheetToText::convert(
+                $fileBytes,
+                $mimeType,
+                $this->spreadsheetLimits(strlen($prompt) + strlen($system) + $this->toolConfigWeight($toolConfig), 1),
+            );
             $parts = [['text' => $extracted], ['text' => $prompt]];
         } else {
             $this->assertSupportedDocumentMimeType($mimeType);
@@ -286,11 +292,12 @@ class GeminiClient implements GenAiClient, HeartbeatAwareClient
      */
     public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array
     {
+        $spreadsheetLimits = $this->spreadsheetLimitsFor($system, $messages, $toolConfig);
         $contents = [];
         foreach ($messages as $message) {
             $parts = [];
             foreach ($message['content'] as $block) {
-                $parts[] = $this->contentBlockToGeminiPart($block);
+                $parts[] = $this->contentBlockToGeminiPart($block, $spreadsheetLimits);
             }
             $contents[] = [
                 'role' => $message['role'] === 'assistant' ? 'model' : 'user',
@@ -606,7 +613,7 @@ class GeminiClient implements GenAiClient, HeartbeatAwareClient
 
     // ── Internal helpers ─────────────────────────────────────────────────────
 
-    private function contentBlockToGeminiPart(ContentBlock $block): array
+    private function contentBlockToGeminiPart(ContentBlock $block, ConversionLimits $spreadsheetLimits): array
     {
         if ($block->type === ContentBlock::TYPE_PROVIDER_RAW) {
             return $block->providerMetadata;
@@ -670,7 +677,7 @@ class GeminiClient implements GenAiClient, HeartbeatAwareClient
                 && SpreadsheetToText::supports($mime)
                 && SpreadsheetToText::isAvailable()
             ) {
-                return ['text' => SpreadsheetToText::convert((string) $block->base64, $mime, $this->conversionLimits)];
+                return ['text' => SpreadsheetToText::convert((string) $block->base64, $mime, $spreadsheetLimits)];
             }
 
             $this->assertSupportedDocumentMimeType($mime);
@@ -768,6 +775,82 @@ class GeminiClient implements GenAiClient, HeartbeatAwareClient
         }
 
         return $result;
+    }
+
+    /**
+     * Conversion limits tightened to what this request can still afford to
+     * spend on extracted spreadsheet text.
+     *
+     * The standalone conversion ceiling is larger than this provider's entire
+     * request budget, so an extract could fill the request by itself and leave
+     * no room for the prompt, the history or the tools — work paid for and then
+     * thrown away by the aggregate check. An extract that knows its allowance
+     * truncates itself and still reaches the model.
+     *
+     * Only spreadsheet extraction is bounded this way. A Word document is
+     * rendered to PDF, which fails rather than truncating, so tightening its
+     * ceiling would turn an oversized request into a hard error instead of a
+     * smaller one.
+     *
+     * @param  list<array{role: string, content: list<ContentBlock>}>  $messages
+     */
+    private function spreadsheetLimitsFor(string $system, array $messages, ?ToolConfig $toolConfig): ConversionLimits
+    {
+        $committed = strlen($system) + $this->toolConfigWeight($toolConfig);
+        $conversions = 0;
+
+        foreach ($messages as $message) {
+            foreach ($message['content'] as $block) {
+                if ($this->convertsToExtractedText($block)) {
+                    $conversions++;
+
+                    continue;
+                }
+                $committed += self::blockWeight($block);
+            }
+        }
+
+        return $this->spreadsheetLimits($committed, $conversions);
+    }
+
+    private function spreadsheetLimits(int $committedBytes, int $conversions): ConversionLimits
+    {
+        if ($conversions === 0) {
+            return $this->conversionLimits;
+        }
+
+        $allowance = FileLimits::conversionOutputAllowance(self::maxRequestBytes(), $committedBytes, $conversions);
+
+        return $allowance === null ? $this->conversionLimits : $this->conversionLimits->withMaxOutputBytes($allowance);
+    }
+
+    private function toolConfigWeight(?ToolConfig $toolConfig): int
+    {
+        return $toolConfig === null
+            ? 0
+            : strlen((string) json_encode($this->applyToolConfig([], $toolConfig)));
+    }
+
+    private function convertsToExtractedText(ContentBlock $block): bool
+    {
+        return $block->type === ContentBlock::TYPE_DOCUMENT
+            && ! self::isSupportedDocumentMimeType((string) $block->mimeType)
+            && SpreadsheetToText::supports((string) $block->mimeType)
+            && SpreadsheetToText::isAvailable();
+    }
+
+    /**
+     * What a block already costs the request budget, measured from the raw
+     * material. A Word document is counted at its input size: the PDF it
+     * renders to is not known until it is built, and is broadly comparable.
+     */
+    private static function blockWeight(ContentBlock $block): int
+    {
+        return match ($block->type) {
+            ContentBlock::TYPE_DOCUMENT => strlen((string) $block->base64),
+            ContentBlock::TYPE_TEXT => strlen((string) $block->text),
+            default => strlen((string) json_encode([$block->toolInput, $block->toolResult, $block->providerMetadata])),
+        };
     }
 
     /**

@@ -15,6 +15,16 @@ use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 final class FileLimits
 {
     /**
+     * Room left for the JSON scaffolding a payload wraps content in — field
+     * names, roles, block types, tool definitions — which is not visible when
+     * the allowance is computed from raw material.
+     */
+    private const REQUEST_ENVELOPE_RESERVE = 65_536;
+
+    /** JSON escaping can double a tab- and newline-heavy extract. */
+    private const ESCAPING_FACTOR = 2;
+
+    /**
      * Decoded byte length of a base64 string, computed without allocating the
      * decoded copy — the strings involved are megabytes wide.
      *
@@ -117,6 +127,38 @@ final class FileLimits
         }
 
         self::assertWithin(strlen($encoded), $limitBytes, $provider, 'the complete serialized request');
+    }
+
+    /**
+     * How many output bytes one document conversion may spend in this request.
+     *
+     * A conversion ceiling chosen in isolation can emit more text than the
+     * provider accepts for the whole request: the extract gets built, the
+     * payload assembled, and only then rejected — paying for the work and
+     * delivering nothing, not even the partial extract that would have fitted.
+     * This derives what is actually left instead, so the conversion truncates
+     * itself to the budget and the model still receives usable data.
+     *
+     * Deliberately pessimistic, because the finished payload does not exist yet
+     * to be measured: an envelope is reserved for the JSON structure and field
+     * names the payload will add around the content, and what remains is halved
+     * because escaping can double a tab- and newline-heavy extract. The exact
+     * check on the finished payload still runs — this only stops it from being
+     * the first thing that notices.
+     *
+     * @param  int  $committedBytes  What the rest of the request already costs.
+     * @param  int  $conversions  Conversions sharing the budget; each gets an equal share.
+     * @return int|null Null when the provider documents no request ceiling.
+     */
+    public static function conversionOutputAllowance(?int $requestBudgetBytes, int $committedBytes, int $conversions = 1): ?int
+    {
+        if ($requestBudgetBytes === null || $conversions < 1) {
+            return null;
+        }
+
+        $remaining = $requestBudgetBytes - $committedBytes - self::REQUEST_ENVELOPE_RESERVE;
+
+        return max(0, intdiv($remaining, self::ESCAPING_FACTOR * $conversions));
     }
 
     public static function humanBytes(int $bytes): string
