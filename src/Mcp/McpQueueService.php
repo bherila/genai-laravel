@@ -133,7 +133,7 @@ final readonly class McpQueueService
         $this->assertQueueFilter($queue);
 
         return $this->db->connection()->transaction(function () use ($context, $queue): array {
-            $this->expireRequests($context, $queue);
+            $this->expireRequests($context, $queue, 'genai:read');
             $counts = collect(McpRequestStatus::cases())->mapWithKeys(fn ($case) => [$case->value => 0])->all();
             McpRequest::query()->with('mailbox')->whereIn('mailbox_id', $context->mailboxIds)
                 ->when($queue !== null, fn ($query) => $query->where('queue', $queue))
@@ -248,7 +248,7 @@ final readonly class McpQueueService
     private function attemptClaim(ExecutionContext $context, ?string $queue, ?string $idempotencyKey): ?array
     {
         return $this->db->connection()->transaction(function () use ($context, $queue, $idempotencyKey): ?array {
-            $this->expireRequests($context, $queue);
+            $this->expireRequests($context, $queue, 'genai:work');
             $this->failExhaustedLeases($context, $queue);
             if ($idempotencyKey !== null) {
                 $replay = $this->replayReceipt($context, $queue, $idempotencyKey, true);
@@ -478,14 +478,21 @@ final readonly class McpQueueService
         return $request;
     }
 
-    private function expireRequests(ExecutionContext $context, ?string $queue): void
+    /**
+     * Retire request-level deadlines the caller is already entitled to act on.
+     * The ability is the one that caller is exercising — reading a queue's
+     * counts, or claiming from it — so a work-only executor reaches the same
+     * terminal state as a caller that also holds read. Mailbox isolation is
+     * unchanged: only requests this context can act on are touched.
+     */
+    private function expireRequests(ExecutionContext $context, ?string $queue, string $ability): void
     {
         $requests = McpRequest::query()->with('mailbox')->whereIn('mailbox_id', $context->mailboxIds)
             ->when($queue !== null, fn ($query) => $query->where('queue', $queue))
             ->whereIn('status', [McpRequestStatus::Pending->value, McpRequestStatus::Leased->value])
             ->whereNotNull('expires_at')->where('expires_at', '<=', now())->lockForUpdate()->get();
         foreach ($requests as $request) {
-            if (! $this->access->authorize($context, $request->mailbox, 'genai:read', $request)) {
+            if (! $this->access->authorize($context, $request->mailbox, $ability, $request)) {
                 continue;
             }
             $request->forceFill([

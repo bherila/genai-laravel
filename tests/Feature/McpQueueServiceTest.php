@@ -219,6 +219,35 @@ final class McpQueueServiceTest extends TestCase
         $this->assertDatabaseHas('genai_mcp_deliveries', ['request_id' => $pending->id, 'type' => 'failed']);
     }
 
+    public function test_work_only_executor_expires_request_deadlines_on_claim(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->prompt('Deadline')->enqueue(new EnqueueOptions(expiresAt: now()->addSecond()));
+        $this->travel(2)->seconds();
+        $workOnly = new ExecutionContext('test-principal', [$mailbox->id], ['genai:work']);
+        $this->resolver->context = $workOnly;
+
+        $this->assertNull($this->app->make(McpQueueService::class)->claim($workOnly));
+
+        $this->assertSame(McpRequestStatus::Expired, McpRequest::query()->findOrFail($pending->id)->status);
+        $this->assertNull(McpRequest::query()->findOrFail($pending->id)->lease_principal);
+    }
+
+    public function test_expiration_still_skips_mailboxes_the_caller_cannot_reach(): void
+    {
+        $other = McpMailbox::query()->create(['owner_type' => 'user', 'owner_id' => '2', 'name' => 'other', 'enabled' => true]);
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($other))
+            ->prompt('Deadline')->enqueue(new EnqueueOptions(expiresAt: now()->addSecond()));
+        $this->travel(2)->seconds();
+        $stranger = new ExecutionContext('test-principal', [$this->mailbox()->id], ['genai:work']);
+        $this->resolver->context = $stranger;
+
+        $this->assertNull($this->app->make(McpQueueService::class)->claim($stranger));
+
+        $this->assertSame(McpRequestStatus::Pending, McpRequest::query()->findOrFail($pending->id)->status);
+    }
+
     public function test_prune_transactionally_expires_request_level_deadlines(): void
     {
         $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
