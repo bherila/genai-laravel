@@ -266,6 +266,19 @@ final class McpQueueServiceTest extends TestCase
         $this->assertDatabaseCount('genai_mcp_attachments', 0);
     }
 
+    public function test_deleting_a_mailbox_through_eloquent_runs_the_same_cleanup(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+        $path = (string) McpAttachment::query()->where('request_id', $pending->id)->firstOrFail()->path;
+
+        $this->assertTrue($mailbox->delete());
+
+        Storage::disk('local')->assertMissing($path);
+        $this->assertDatabaseMissing('genai_mcp_mailboxes', ['id' => $mailbox->id]);
+    }
+
     public function test_deleting_a_mailbox_leaves_host_owned_attachments_to_the_host(): void
     {
         $mailbox = $this->mailbox();
