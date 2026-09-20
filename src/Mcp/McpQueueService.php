@@ -41,7 +41,8 @@ final readonly class McpQueueService
         if (! $mailbox->enabled) {
             throw new McpQueueException('Mailbox is disabled.', 409);
         }
-        $options ??= new EnqueueOptions(maxAttempts: (int) config('genai.mcp.max_attempts', 3));
+        $options ??= new EnqueueOptions;
+        $maxAttempts = $options->maxAttempts ?? (int) config('genai.mcp.max_attempts', 3);
         if (! preg_match('/^[A-Za-z0-9._-]{1,80}$/', $options->queue)) {
             throw new McpQueueException('Queue name is invalid.', 422);
         }
@@ -51,7 +52,7 @@ final readonly class McpQueueService
         if ($options->priority < -2147483648 || $options->priority > 2147483647) {
             throw new McpQueueException('Priority is outside the supported integer range.', 422);
         }
-        if ($options->maxAttempts < 1 || $options->maxAttempts > 100) {
+        if ($maxAttempts < 1 || $maxAttempts > 100) {
             throw new McpQueueException('maxAttempts must be between 1 and 100.', 422);
         }
         if ($options->expiresAt !== null && $options->expiresAt <= ($options->availableAt ?? now())) {
@@ -63,15 +64,20 @@ final readonly class McpQueueService
             $this->schemas->assertPortable($tool['input_schema']);
         }
         $this->assertPayloadBounds($raw, $options->metadata);
-        $enqueueHash = hash('sha256', $this->canonicalJson([
+        $work = [
             'payload' => $raw, 'queue' => $options->queue, 'priority' => $options->priority,
             'available_at' => $options->availableAt?->format(DATE_ATOM), 'expires_at' => $options->expiresAt?->format(DATE_ATOM),
-            'max_attempts' => $options->maxAttempts, 'metadata' => $options->metadata,
-        ]));
+            'max_attempts' => $maxAttempts, 'metadata' => $options->metadata,
+        ];
+        $enqueueHash = hash('sha256', $this->canonicalJson($work));
+        // Work enqueued before nested objects were canonicalized carries the
+        // older digest, and repeating it must still replay rather than look
+        // like a different request under the same key.
+        $enqueueHashes = [$enqueueHash, hash('sha256', $this->legacyCanonicalJson($work))];
 
         $requestId = (string) Str::uuid();
         try {
-            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $enqueueHash, $requestId): McpRequest {
+            return $this->db->connection()->transaction(function () use ($mailbox, $raw, $options, $maxAttempts, $enqueueHash, $enqueueHashes, $requestId): McpRequest {
                 $mailbox = McpMailbox::query()->lockForUpdate()->find($mailbox->id);
                 if ($mailbox === null) {
                     throw new McpQueueException('Mailbox not found.', 404);
@@ -83,7 +89,7 @@ final readonly class McpQueueService
                     $existing = McpRequest::query()->where('mailbox_id', $mailbox->id)
                         ->where('idempotency_key', $options->idempotencyKey)->lockForUpdate()->first();
                     if ($existing !== null) {
-                        if (! hash_equals((string) $existing->enqueue_hash, $enqueueHash)) {
+                        if (! $this->matchesAny((string) $existing->enqueue_hash, $enqueueHashes)) {
                             throw new McpQueueException('Idempotency key was already used for different work.', 409);
                         }
 
@@ -98,7 +104,7 @@ final readonly class McpQueueService
                     'idempotency_key' => $options->idempotencyKey,
                     'enqueue_hash' => $enqueueHash,
                     'available_at' => $options->availableAt ?? now(), 'expires_at' => $options->expiresAt,
-                    'max_attempts' => $options->maxAttempts,
+                    'max_attempts' => $maxAttempts,
                 ]);
                 $request->payload = $this->materializeAttachments($request, $raw);
                 $request->save();
@@ -127,7 +133,7 @@ final readonly class McpQueueService
         $this->assertQueueFilter($queue);
 
         return $this->db->connection()->transaction(function () use ($context, $queue): array {
-            $this->expireRequests($context, $queue);
+            $this->expireRequests($context, $queue, 'genai:read');
             $counts = collect(McpRequestStatus::cases())->mapWithKeys(fn ($case) => [$case->value => 0])->all();
             McpRequest::query()->with('mailbox')->whereIn('mailbox_id', $context->mailboxIds)
                 ->when($queue !== null, fn ($query) => $query->where('queue', $queue))
@@ -242,7 +248,7 @@ final readonly class McpQueueService
     private function attemptClaim(ExecutionContext $context, ?string $queue, ?string $idempotencyKey): ?array
     {
         return $this->db->connection()->transaction(function () use ($context, $queue, $idempotencyKey): ?array {
-            $this->expireRequests($context, $queue);
+            $this->expireRequests($context, $queue, 'genai:work');
             $this->failExhaustedLeases($context, $queue);
             if ($idempotencyKey !== null) {
                 $replay = $this->replayReceipt($context, $queue, $idempotencyKey, true);
@@ -363,16 +369,14 @@ final readonly class McpQueueService
         }
         $submitted = ['text' => $response['text'] ?? '', 'tool_calls' => $response['tool_calls'] ?? []];
         $response = ['text' => $submitted['text'], 'tool_calls' => $this->identifiedToolCalls($requestId, $submitted['tool_calls'])];
-        $hash = hash('sha256', $this->canonicalJson(['response' => $response, 'executor' => $executor]));
-        // A completion committed before tool-call ids existed was hashed without
-        // them, so its replay must still match rather than answer 409.
-        $legacyHash = hash('sha256', $this->canonicalJson(['response' => $submitted, 'executor' => $executor]));
+        $hashes = $this->completionHashes($submitted, $response, $executor);
+        $hash = $hashes[0];
 
-        return $this->db->connection()->transaction(function () use ($context, $requestId, $leaseToken, $response, $executor, $hash, $legacyHash): array {
+        return $this->db->connection()->transaction(function () use ($context, $requestId, $leaseToken, $response, $executor, $hash, $hashes): array {
             $request = $this->authorizedRequest($context, $requestId, 'genai:work', true);
             if ($request->status === McpRequestStatus::Completed) {
                 $stored = (string) $request->completion_hash;
-                if ((hash_equals($stored, $hash) || hash_equals($stored, $legacyHash))
+                if ($this->matchesAny($stored, $hashes)
                     && hash_equals((string) $request->completion_lease_hash, hash('sha256', $leaseToken))
                     && $request->completion_principal === $context->principalKey) {
                     return $this->receipt($request);
@@ -430,6 +434,56 @@ final readonly class McpQueueService
         return $this->authorizedRequest($context, $requestId, $ability, false);
     }
 
+    /**
+     * The supported way to tear a mailbox down. The caller is responsible for
+     * authorizing its own mailbox/domain job, as with cancellation.
+     *
+     * Removing the row cascades its requests and attachments away, and those
+     * rows are the only record of the objects this package wrote to disk, so
+     * the owned bytes go first. Host-owned attachments are left alone: the
+     * package holds an opaque reference to those and the host still owns the
+     * evidence behind it.
+     */
+    public function purgeMailbox(McpMailbox|string $mailbox): void
+    {
+        $mailbox = is_string($mailbox) ? McpMailbox::query()->findOrFail($mailbox) : $mailbox;
+        $mailbox->delete();
+    }
+
+    /**
+     * Delete every object this package wrote to disk for a mailbox.
+     *
+     * The mailbox is disabled first so nothing new is enqueued into it while
+     * its bytes are being removed. A storage failure throws with every row
+     * still in place, so a transient error leaves a retryable teardown rather
+     * than bytes no row points at any more. Called for you when a mailbox is
+     * deleted through Eloquent; call it directly to clear the bytes without
+     * removing the mailbox.
+     */
+    public function discardOwnedObjects(McpMailbox $mailbox): void
+    {
+        $this->db->connection()->transaction(function () use ($mailbox): void {
+            $locked = McpMailbox::query()->lockForUpdate()->find($mailbox->id);
+            if ($locked !== null && $locked->enabled) {
+                $locked->forceFill(['enabled' => false])->save();
+            }
+        });
+
+        McpAttachment::query()
+            ->where('package_owned', true)->whereNotNull('disk')->whereNotNull('path')
+            ->whereIn('request_id', McpRequest::query()->select('id')->where('mailbox_id', $mailbox->id))
+            ->eachById(function (McpAttachment $attachment): void {
+                try {
+                    $deleted = Storage::disk((string) $attachment->disk)->delete((string) $attachment->path);
+                } catch (Throwable $exception) {
+                    throw new McpQueueException('Mailbox storage could not be cleared: '.$exception->getMessage(), 503);
+                }
+                if (! $deleted) {
+                    throw new McpQueueException('Mailbox storage could not be cleared.', 503);
+                }
+            });
+    }
+
     /** Producer-side cancellation. The caller is responsible for authorizing its mailbox/domain job. */
     public function cancel(McpRequest|string $request): McpRequest
     {
@@ -474,14 +528,21 @@ final readonly class McpQueueService
         return $request;
     }
 
-    private function expireRequests(ExecutionContext $context, ?string $queue): void
+    /**
+     * Retire request-level deadlines the caller is already entitled to act on.
+     * The ability is the one that caller is exercising — reading a queue's
+     * counts, or claiming from it — so a work-only executor reaches the same
+     * terminal state as a caller that also holds read. Mailbox isolation is
+     * unchanged: only requests this context can act on are touched.
+     */
+    private function expireRequests(ExecutionContext $context, ?string $queue, string $ability): void
     {
         $requests = McpRequest::query()->with('mailbox')->whereIn('mailbox_id', $context->mailboxIds)
             ->when($queue !== null, fn ($query) => $query->where('queue', $queue))
             ->whereIn('status', [McpRequestStatus::Pending->value, McpRequestStatus::Leased->value])
             ->whereNotNull('expires_at')->where('expires_at', '<=', now())->lockForUpdate()->get();
         foreach ($requests as $request) {
-            if (! $this->access->authorize($context, $request->mailbox, 'genai:read', $request)) {
+            if (! $this->access->authorize($context, $request->mailbox, $ability, $request)) {
                 continue;
             }
             $request->forceFill([
@@ -673,12 +734,35 @@ final readonly class McpQueueService
     {
         $result = $request->result;
         // A result stored before tool-call ids existed still has to satisfy the
-        // receipt schema that now requires them.
+        // receipt schema that now requires them, and a no-argument call has to
+        // regain the object shape its input schema declares.
         if (is_array($result) && ($result['tool_calls'] ?? []) !== []) {
-            $result['tool_calls'] = $this->identifiedToolCalls($request->id, $result['tool_calls']);
+            $result['tool_calls'] = $this->wireToolInputs($this->identifiedToolCalls($request->id, $result['tool_calls']));
         }
 
         return ['request_id' => $request->id, 'status' => 'completed', 'receipt_id' => $request->completion_receipt_id, 'result' => $result];
+    }
+
+    /**
+     * The same restoration for the tool calls of a stored completion, so a
+     * receipt — first answer and idempotent replay alike — reports the empty
+     * input its tool declared rather than the empty list Eloquent read back.
+     *
+     * @param  mixed  $calls
+     * @return mixed
+     */
+    private function wireToolInputs($calls)
+    {
+        if (! is_array($calls)) {
+            return $calls;
+        }
+        foreach ($calls as $index => $call) {
+            if (is_array($call) && ($call['input'] ?? null) === []) {
+                $calls[$index]['input'] = new \stdClass;
+            }
+        }
+
+        return $calls;
     }
 
     /**
@@ -723,8 +807,86 @@ final readonly class McpQueueService
         return max(1, min(86400, $configured[min(max(0, $attempt - 1), count($configured) - 1)]));
     }
 
+    /**
+     * The digest stored for a completion, followed by the historical encodings
+     * an already-committed completion can still present on replay: one hashed
+     * before tool-call ids existed, and one hashed before nested objects were
+     * canonicalized. A replay matching any of them is the same completion.
+     *
+     * @param  array<string, mixed>  $submitted
+     * @param  array<string, mixed>  $identified
+     * @param  array<string, mixed>  $executor
+     * @return non-empty-list<string>
+     */
+    private function completionHashes(array $submitted, array $identified, array $executor): array
+    {
+        $digest = fn (array $response, bool $legacy): string => hash('sha256', $legacy
+            ? $this->legacyCanonicalJson(['response' => $response, 'executor' => $executor])
+            : $this->canonicalJson(['response' => $response, 'executor' => $executor]));
+
+        return array_values(array_unique([
+            $digest($identified, false),
+            $digest($submitted, false),
+            $digest($identified, true),
+            $digest($submitted, true),
+        ]));
+    }
+
+    /**
+     * Whether a stored digest is any of the ones this call accepts. Every
+     * candidate is compared so the answer does not leak which one matched.
+     *
+     * @param  non-empty-list<string>  $candidates
+     */
+    private function matchesAny(string $stored, array $candidates): bool
+    {
+        $matched = false;
+        foreach ($candidates as $candidate) {
+            $matched = hash_equals($stored, $candidate) || $matched;
+        }
+
+        return $matched;
+    }
+
     /** @param array<string, mixed> $data */
     private function canonicalJson(array $data): string
+    {
+        return json_encode($this->canonicalize($data), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+
+    /**
+     * Object members are ordered like array keys, so two payloads that differ
+     * only in how their transport ordered a nested object hash the same. A
+     * decoded object stays an object rather than becoming a property map, so an
+     * empty one still encodes as `{}` and a numeric-keyed one never collapses
+     * into a JSON array and collides with a genuine list.
+     */
+    private function canonicalize(mixed $value): mixed
+    {
+        if (is_object($value)) {
+            $properties = get_object_vars($value);
+            ksort($properties);
+
+            return (object) array_map($this->canonicalize(...), $properties);
+        }
+        if (! is_array($value)) {
+            return $value;
+        }
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return array_map($this->canonicalize(...), $value);
+    }
+
+    /**
+     * The encoding used before nested objects were canonicalized, where object
+     * members kept the order their transport sent them in. Kept only so work
+     * hashed under it still replays instead of answering 409.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function legacyCanonicalJson(array $data): string
     {
         $sort = function (mixed $value) use (&$sort): mixed {
             if (! is_array($value)) {

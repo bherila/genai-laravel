@@ -17,9 +17,12 @@ use Bherila\GenAiLaravel\Mcp\ExecutionContext;
 use Bherila\GenAiLaravel\Mcp\McpClientFactory;
 use Bherila\GenAiLaravel\Mcp\McpQueueService;
 use Bherila\GenAiLaravel\Mcp\McpTokenService;
+use Bherila\GenAiLaravel\Mcp\Models\McpAttachment;
 use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
+use Bherila\GenAiLaravel\Mcp\PendingGenAiRequest;
+use Bherila\GenAiLaravel\Mcp\StoredAttachment;
 use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -30,6 +33,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Testing\TestResponse;
 use Orchestra\Testbench\TestCase;
 use Symfony\Component\HttpFoundation\JsonResponse;
 
@@ -41,6 +45,10 @@ final class McpQueueServiceTest extends TestCase
 
     private TestMailboxAccessResolver $resolver;
 
+    private ?string $mcpSessionId = null;
+
+    private int $mcpRequestId = 1;
+
     protected function getPackageProviders($app): array
     {
         return [GenAiServiceProvider::class];
@@ -49,7 +57,7 @@ final class McpQueueServiceTest extends TestCase
     protected function defineEnvironment($app): void
     {
         $app['config']->set('database.default', 'testing');
-        $app['config']->set('database.connections.testing', ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => '']);
+        $app['config']->set('database.connections.testing', ['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => '', 'foreign_key_constraints' => true]);
         $app['config']->set('app.key', 'base64:'.base64_encode(str_repeat('x', 32)));
         $app['config']->set('genai.mcp.enabled', true);
         $app['config']->set('genai.mcp.rest.enabled', true);
@@ -213,6 +221,188 @@ final class McpQueueServiceTest extends TestCase
         $this->assertDatabaseHas('genai_mcp_deliveries', ['request_id' => $pending->id, 'type' => 'failed']);
     }
 
+    public function test_work_only_executor_expires_request_deadlines_on_claim(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->prompt('Deadline')->enqueue(new EnqueueOptions(expiresAt: now()->addSecond()));
+        $this->travel(2)->seconds();
+        $workOnly = new ExecutionContext('test-principal', [$mailbox->id], ['genai:work']);
+        $this->resolver->context = $workOnly;
+
+        $this->assertNull($this->app->make(McpQueueService::class)->claim($workOnly));
+
+        $this->assertSame(McpRequestStatus::Expired, McpRequest::query()->findOrFail($pending->id)->status);
+        $this->assertNull(McpRequest::query()->findOrFail($pending->id)->lease_principal);
+    }
+
+    public function test_expiration_still_skips_mailboxes_the_caller_cannot_reach(): void
+    {
+        $other = McpMailbox::query()->create(['owner_type' => 'user', 'owner_id' => '2', 'name' => 'other', 'enabled' => true]);
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($other))
+            ->prompt('Deadline')->enqueue(new EnqueueOptions(expiresAt: now()->addSecond()));
+        $this->travel(2)->seconds();
+        $stranger = new ExecutionContext('test-principal', [$this->mailbox()->id], ['genai:work']);
+        $this->resolver->context = $stranger;
+
+        $this->assertNull($this->app->make(McpQueueService::class)->claim($stranger));
+
+        $this->assertSame(McpRequestStatus::Pending, McpRequest::query()->findOrFail($pending->id)->status);
+    }
+
+    public function test_deleting_a_mailbox_removes_package_owned_bytes_and_rows(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+        $path = (string) McpAttachment::query()->where('request_id', $pending->id)->firstOrFail()->path;
+        Storage::disk('local')->assertExists($path);
+
+        $this->app->make(McpQueueService::class)->purgeMailbox($mailbox->id);
+
+        Storage::disk('local')->assertMissing($path);
+        $this->assertDatabaseMissing('genai_mcp_mailboxes', ['id' => $mailbox->id]);
+        $this->assertDatabaseCount('genai_mcp_requests', 0);
+        $this->assertDatabaseCount('genai_mcp_attachments', 0);
+    }
+
+    public function test_deleting_a_mailbox_through_eloquent_runs_the_same_cleanup(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+        $path = (string) McpAttachment::query()->where('request_id', $pending->id)->firstOrFail()->path;
+
+        $this->assertTrue($mailbox->delete());
+
+        Storage::disk('local')->assertMissing($path);
+        $this->assertDatabaseMissing('genai_mcp_mailboxes', ['id' => $mailbox->id]);
+    }
+
+    public function test_deleting_a_mailbox_leaves_host_owned_attachments_to_the_host(): void
+    {
+        $mailbox = $this->mailbox();
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->withStoredAttachment(new StoredAttachment('report.pdf', 'application/pdf', 12, str_repeat('a', 64), hostReference: 'document:7'))
+            ->prompt('Read it')->enqueue();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldNotReceive('delete');
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $this->app->make(McpQueueService::class)->purgeMailbox($mailbox);
+
+        $this->assertDatabaseMissing('genai_mcp_mailboxes', ['id' => $mailbox->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 0);
+    }
+
+    public function test_mailbox_teardown_keeps_every_row_when_storage_cannot_be_cleared(): void
+    {
+        $mailbox = $this->mailbox();
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($mailbox))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldReceive('delete')->once()->andReturnFalse();
+        Storage::shouldReceive('disk')->with('local')->andReturn($disk);
+
+        try {
+            $this->app->make(McpQueueService::class)->purgeMailbox($mailbox);
+            $this->fail('Expected the failed storage delete to abort mailbox teardown.');
+        } catch (McpQueueException $exception) {
+            $this->assertSame(503, $exception->httpStatus);
+        }
+
+        $this->assertDatabaseHas('genai_mcp_mailboxes', ['id' => $mailbox->id]);
+        $this->assertDatabaseHas('genai_mcp_requests', ['id' => $pending->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 1);
+    }
+
+    public function test_mailbox_teardown_closes_the_mailbox_to_new_work_first(): void
+    {
+        $mailbox = $this->mailbox();
+        $client = $this->app->make(McpClientFactory::class)->forMailbox($mailbox);
+        GenAiRequest::with($client)->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldReceive('delete')->once()->andReturnFalse();
+        $disk->shouldReceive('deleteDirectory')->andReturnTrue();
+        Storage::shouldReceive('disk')->with('local')->andReturn($disk);
+
+        try {
+            $this->app->make(McpQueueService::class)->purgeMailbox($mailbox);
+        } catch (McpQueueException) {
+            // The aborted teardown is the point: the mailbox must stay closed.
+        }
+
+        $this->assertFalse(McpMailbox::query()->findOrFail($mailbox->id)->enabled);
+        $this->expectException(McpQueueException::class);
+        GenAiRequest::with($client)->prompt('Too late')->enqueue();
+    }
+
+    public function test_prune_keeps_request_metadata_when_owned_deletion_fails_then_retries(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context);
+        $service->complete($this->context, $pending->id, $claim['request']['lease_token'], ['text' => 'Done']);
+        McpDelivery::query()->where('request_id', $pending->id)->update(['acknowledged_at' => now()]);
+        $this->travel(31)->days();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldReceive('delete')->twice()->andReturnValues([false, true]);
+        Storage::shouldReceive('disk')->with('local')->andReturn($disk);
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+        $this->assertDatabaseHas('genai_mcp_requests', ['id' => $pending->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 1);
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+        $this->assertDatabaseMissing('genai_mcp_requests', ['id' => $pending->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 0);
+    }
+
+    public function test_prune_keeps_request_metadata_when_owned_deletion_throws(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context);
+        $service->complete($this->context, $pending->id, $claim['request']['lease_token'], ['text' => 'Done']);
+        McpDelivery::query()->where('request_id', $pending->id)->update(['acknowledged_at' => now()]);
+        $this->travel(31)->days();
+
+        $failing = \Mockery::mock(Filesystem::class);
+        $failing->shouldReceive('delete')->once()->andThrow(new \RuntimeException('disk offline'));
+        Storage::shouldReceive('disk')->with('local')->andReturn($failing);
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+
+        $this->assertDatabaseHas('genai_mcp_requests', ['id' => $pending->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 1);
+    }
+
+    public function test_prune_never_deletes_host_owned_attachment_bytes(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->withStoredAttachment(new StoredAttachment('report.pdf', 'application/pdf', 12, str_repeat('a', 64), hostReference: 'document:7'))
+            ->prompt('Read it')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context);
+        $service->complete($this->context, $pending->id, $claim['request']['lease_token'], ['text' => 'Done']);
+        McpDelivery::query()->where('request_id', $pending->id)->update(['acknowledged_at' => now()]);
+        $this->travel(31)->days();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldNotReceive('delete');
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+
+        $this->assertDatabaseMissing('genai_mcp_requests', ['id' => $pending->id]);
+    }
+
     public function test_prune_transactionally_expires_request_level_deadlines(): void
     {
         $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
@@ -239,6 +429,38 @@ final class McpQueueServiceTest extends TestCase
             $this->assertSame(422, $e->httpStatus);
         }
         $this->assertSame(McpRequestStatus::Leased, $pending->status());
+    }
+
+    public function test_enqueue_rejects_a_structurally_invalid_tool_schema(): void
+    {
+        $this->expectException(McpQueueException::class);
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('extract', 'Extract', Schema::fromArray([
+                'type' => 'object', 'required' => 'amount',
+            ]))], ToolChoice::any()))
+            ->prompt('Read it')->enqueue();
+    }
+
+    public function test_enqueue_rejects_a_scalar_tool_input_schema(): void
+    {
+        $this->expectException(McpQueueException::class);
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('echo', 'Echo', Schema::string('Anything'))], ToolChoice::any()))
+            ->prompt('Read it')->enqueue();
+    }
+
+    public function test_a_rejected_tool_schema_never_reaches_the_queue(): void
+    {
+        try {
+            GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+                ->tools(new ToolConfig([new ToolDefinition('echo', 'Echo', Schema::arrayOf(Schema::string()))], ToolChoice::any()))
+                ->prompt('Read it')->enqueue();
+            $this->fail('Expected the list-shaped tool input schema to be rejected.');
+        } catch (McpQueueException $exception) {
+            $this->assertSame(422, $exception->httpStatus);
+        }
+
+        $this->assertDatabaseCount('genai_mcp_requests', 0);
     }
 
     public function test_auto_submission_requires_nonempty_text_or_a_defined_tool_call(): void
@@ -290,6 +512,47 @@ final class McpQueueServiceTest extends TestCase
             'lease_token' => $claim['request']['lease_token'],
             'response' => ['tool_calls' => [['name' => 'ping', 'input' => new \stdClass]]],
         ])->assertOk()->assertJsonPath('status', 'completed');
+    }
+
+    public function test_rest_receipt_reports_an_empty_tool_input_as_a_json_object(): void
+    {
+        $pending = $this->pendingWithNoArgumentTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $body = ['lease_token' => $claim['request']['lease_token'],
+            'response' => ['tool_calls' => [['name' => 'ping', 'input' => new \stdClass]]]];
+
+        $first = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', $body)->assertOk();
+        $replay = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', $body)->assertOk();
+        $status = $this->getJson('/genai/mcp/v1/requests/'.$pending->id)->assertOk();
+
+        foreach ([$first, $replay] as $response) {
+            $this->assertStringContainsString('"input":{}', $response->getContent());
+        }
+        $this->assertStringContainsString('"input":{}', $status->getContent());
+    }
+
+    public function test_mcp_receipt_reports_an_empty_tool_input_as_a_json_object(): void
+    {
+        $pending = $this->pendingWithNoArgumentTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $arguments = ['request_id' => $pending->id, 'lease_token' => $claim['request']['lease_token'],
+            'response' => ['tool_calls' => [['name' => 'ping', 'input' => new \stdClass]]]];
+
+        $first = $this->mcpToolCall('complete_genai_request', $arguments)->assertOk();
+        $replay = $this->mcpToolCall('complete_genai_request', $arguments)->assertOk();
+
+        // Asserted on the raw body: decoding it here would itself turn the
+        // empty object into an empty list and hide the shape under test.
+        foreach ([$first, $replay] as $response) {
+            $this->assertStringContainsString('"input":{}', $response->getContent());
+        }
+    }
+
+    private function pendingWithNoArgumentTool(): PendingGenAiRequest
+    {
+        return GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('ping', 'No input', Schema::object([]))], ToolChoice::any()))
+            ->prompt('Ping')->enqueue();
     }
 
     public function test_inline_attachment_is_stored_and_streamed_over_signed_authenticated_rest(): void
@@ -475,6 +738,228 @@ final class McpQueueServiceTest extends TestCase
         $delivery = McpDelivery::query()->where('request_id', $pending->id)->firstOrFail();
         $this->assertSame([$delivery->id], $handler->seen);
         $this->assertNotNull($delivery->acknowledged_at);
+    }
+
+    public function test_mcp_completion_replay_ignores_nested_object_member_order(): void
+    {
+        $pending = $this->pendingWithNestedObjectTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $first = $this->mcpToolCall('complete_genai_request', [
+            'request_id' => $pending->id, 'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['b' => '2', 'a' => '1']]]]],
+        ])->assertOk();
+        $replay = $this->mcpToolCall('complete_genai_request', [
+            'request_id' => $pending->id, 'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['a' => '1', 'b' => '2']]]]],
+        ])->assertOk();
+
+        $this->assertSame(
+            $first->json('result.structuredContent.receipt_id'),
+            $replay->json('result.structuredContent.receipt_id'),
+        );
+    }
+
+    public function test_rest_completion_replay_ignores_nested_object_member_order(): void
+    {
+        $pending = $this->pendingWithNestedObjectTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $first = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['b' => '2', 'a' => '1']]]]],
+        ])->assertOk();
+        $replay = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['a' => '1', 'b' => '2']]]]],
+        ])->assertOk();
+
+        $this->assertSame($first->json('receipt_id'), $replay->json('receipt_id'));
+    }
+
+    public function test_completion_replay_with_different_nested_values_still_conflicts(): void
+    {
+        $pending = $this->pendingWithNestedObjectTool();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['a' => '1', 'b' => '2']]]]],
+        ])->assertOk();
+        $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['a' => '1', 'b' => '3']]]]],
+        ])->assertStatus(409);
+    }
+
+    public function test_completion_replay_ignores_numeric_keyed_nested_member_order(): void
+    {
+        // Numeric-keyed members survive both transports as JSON objects rather
+        // than property maps, so only recursive canonicalization sorts them.
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('record', 'Record fields', Schema::object([
+                'fields' => Schema::fromArray(['type' => 'object']),
+            ], ['fields']))], ToolChoice::any()))
+            ->prompt('Record it')->enqueue();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $first = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['2' => 'b', '1' => 'a']]]]],
+        ])->assertOk();
+        $replay = $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/complete', [
+            'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['1' => 'a', '2' => 'b']]]]],
+        ])->assertOk();
+
+        $this->assertSame($first->json('receipt_id'), $replay->json('receipt_id'));
+    }
+
+    public function test_mcp_completion_replay_ignores_numeric_keyed_nested_member_order(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('record', 'Record fields', Schema::object([
+                'fields' => Schema::fromArray(['type' => 'object']),
+            ], ['fields']))], ToolChoice::any()))
+            ->prompt('Record it')->enqueue();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+        $token = $claim['request']['lease_token'];
+
+        $first = $this->mcpToolCall('complete_genai_request', [
+            'request_id' => $pending->id, 'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['2' => 'b', '1' => 'a']]]]],
+        ])->assertOk();
+        $replay = $this->mcpToolCall('complete_genai_request', [
+            'request_id' => $pending->id, 'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => ['fields' => ['1' => 'a', '2' => 'b']]]]],
+        ])->assertOk();
+
+        $this->assertSame(
+            $first->json('result.structuredContent.receipt_id'),
+            $replay->json('result.structuredContent.receipt_id'),
+        );
+    }
+
+    public function test_enqueue_idempotency_ignores_nested_metadata_member_order(): void
+    {
+        $mailbox = $this->mailbox();
+        $client = $this->app->make(McpClientFactory::class)->forMailbox($mailbox);
+        $first = GenAiRequest::with($client)->prompt('Read it')
+            ->enqueue(new EnqueueOptions(idempotencyKey: 'invoice:9', metadata: ['trace' => ['b' => '2', 'a' => '1']]));
+        $second = GenAiRequest::with($client)->prompt('Read it')
+            ->enqueue(new EnqueueOptions(idempotencyKey: 'invoice:9', metadata: ['trace' => ['a' => '1', 'b' => '2']]));
+
+        $this->assertSame($first->id, $second->id);
+    }
+
+    public function test_enqueue_options_without_an_override_follow_configured_max_attempts(): void
+    {
+        config(['genai.mcp.max_attempts' => 7]);
+
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue(new EnqueueOptions(queue: 'invoices', priority: 5));
+
+        $this->assertSame(7, McpRequest::query()->findOrFail($pending->id)->max_attempts);
+    }
+
+    public function test_enqueue_without_options_follows_configured_max_attempts(): void
+    {
+        config(['genai.mcp.max_attempts' => 9]);
+
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue();
+
+        $this->assertSame(9, McpRequest::query()->findOrFail($pending->id)->max_attempts);
+    }
+
+    public function test_explicit_max_attempts_override_wins_over_configuration(): void
+    {
+        config(['genai.mcp.max_attempts' => 7]);
+
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue(new EnqueueOptions(maxAttempts: 2));
+
+        $this->assertSame(2, McpRequest::query()->findOrFail($pending->id)->max_attempts);
+    }
+
+    public function test_configured_max_attempts_outside_the_supported_range_is_rejected(): void
+    {
+        config(['genai.mcp.max_attempts' => 0]);
+
+        $this->expectException(McpQueueException::class);
+        GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue();
+    }
+
+    public function test_rest_rejects_an_array_queue_filter_with_a_structured_422(): void
+    {
+        $this->mailbox();
+
+        $this->getJson('/genai/mcp/v1/queue/status?queue[]=a&queue[]=b')
+            ->assertStatus(422)->assertJsonPath('details.field', 'queue');
+        $this->postJson('/genai/mcp/v1/claims', ['queue' => ['a', 'b']])
+            ->assertStatus(422)->assertJsonPath('details.field', 'queue');
+    }
+
+    public function test_rest_rejects_array_failure_fields_with_a_structured_422(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+
+        $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/fail', [
+            'lease_token' => $claim['request']['lease_token'],
+            'error' => ['code' => ['nope'], 'message' => 'broke'],
+            'retryable' => false,
+        ])->assertStatus(422)->assertJsonPath('details.field', 'error.code');
+
+        $this->assertSame(McpRequestStatus::Leased, $pending->status());
+    }
+
+    public function test_rest_still_accepts_a_string_queue_filter(): void
+    {
+        $this->mailbox();
+
+        $this->getJson('/genai/mcp/v1/queue/status?queue=invoices')->assertOk();
+        $this->postJson('/genai/mcp/v1/claims', ['queue' => 'invoices'])->assertNoContent();
+    }
+
+    private function pendingWithNestedObjectTool(): PendingGenAiRequest
+    {
+        return GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->tools(new ToolConfig([new ToolDefinition('record', 'Record fields', Schema::object([
+                'fields' => Schema::object(['a' => Schema::string(), 'b' => Schema::string()]),
+            ], ['fields']))], ToolChoice::any()))
+            ->prompt('Record it')->enqueue();
+    }
+
+    /**
+     * Drive one tool call over the standalone MCP endpoint, where nested JSON
+     * members reach the queue as objects rather than as property maps.
+     *
+     * @param  array<string, mixed>  $arguments
+     */
+    private function mcpToolCall(string $name, array $arguments): TestResponse
+    {
+        $headers = ['Accept' => 'application/json, text/event-stream', 'Authorization' => 'Bearer test-token'];
+        if ($this->mcpSessionId === null) {
+            $initialize = $this->postJson('/genai/mcp', [
+                'jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize',
+                'params' => ['protocolVersion' => '2025-03-26', 'capabilities' => [], 'clientInfo' => ['name' => 'test', 'version' => '1']],
+            ], $headers)->assertOk();
+            $this->mcpSessionId = $initialize->headers->get('Mcp-Session-Id');
+        }
+        $headers['Mcp-Session-Id'] = $this->mcpSessionId;
+        $headers['Mcp-Protocol-Version'] = '2025-03-26';
+
+        return $this->postJson('/genai/mcp', [
+            'jsonrpc' => '2.0', 'id' => ++$this->mcpRequestId, 'method' => 'tools/call',
+            'params' => ['name' => $name, 'arguments' => $arguments],
+        ], $headers);
     }
 
     private function mailbox(): McpMailbox

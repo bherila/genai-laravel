@@ -6,3 +6,6 @@ parameters:
     level: 6
     paths:
         - src
+        # Not a test: a fixture that reads every persisted MCP model attribute,
+        # so a PHPDoc gap fails here rather than in a Larastan consumer's build.
+        - tests/StaticAnalysis

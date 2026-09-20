@@ -9,6 +9,9 @@ return new class extends Migration
     /** Explicit name: the generated one is 68 characters, above MySQL's 64-character identifier limit. */
     private const DELIVERY_PENDING_INDEX = 'genai_mcp_deliveries_pending_idx';
 
+    /** The filtered replacement built by {@see applyFilteredIdempotencyUniqueness()}. */
+    private const REQUEST_IDEMPOTENCY_INDEX = 'genai_mcp_requests_idempotency_unique';
+
     public function up(): void
     {
         $this->createIfMissing('genai_mcp_mailboxes', function (Blueprint $table): void {
@@ -60,9 +63,15 @@ return new class extends Migration
             $table->string('completion_principal')->nullable();
             $table->uuid('completion_receipt_id')->nullable();
             $table->timestamps();
-            $table->unique(['mailbox_id', 'idempotency_key']);
+            if (! $this->filtersNullIdempotencyKeys()) {
+                $table->unique(['mailbox_id', 'idempotency_key']);
+            }
             $table->index(['mailbox_id', 'queue', 'status', 'available_at', 'priority'], 'genai_mcp_claim_idx');
         });
+
+        if ($this->filtersNullIdempotencyKeys()) {
+            $this->applyFilteredIdempotencyUniqueness();
+        }
 
         $this->createIfMissing('genai_mcp_attachments', function (Blueprint $table): void {
             $table->uuid('id')->primary();
@@ -114,6 +123,42 @@ return new class extends Migration
                 $table->index(['acknowledged_at', 'available_at', 'leased_until'], self::DELIVERY_PENDING_INDEX);
             });
         }
+    }
+
+    /**
+     * SQL Server treats two NULLs as equal in a unique index, so an ordinary unique constraint on
+     * (mailbox_id, idempotency_key) would let a mailbox hold only one request without an
+     * idempotency key — and ordinary enqueues, the common case, carry no key at all.
+     */
+    private function filtersNullIdempotencyKeys(): bool
+    {
+        return Schema::getConnection()->getDriverName() === 'sqlsrv';
+    }
+
+    /**
+     * Constrain only the keys that actually have to be unique. An install created before this fix
+     * carries the plain unique index, which still collapses null keys, so replace it rather than
+     * sit beside it.
+     */
+    private function applyFilteredIdempotencyUniqueness(): void
+    {
+        $connection = Schema::getConnection();
+        $grammar = $connection->getSchemaGrammar();
+        $table = $grammar->wrapTable('genai_mcp_requests');
+        foreach (Schema::getIndexes('genai_mcp_requests') as $index) {
+            $columns = array_values((array) ($index['columns'] ?? []));
+            if (($index['unique'] ?? false) && $columns === ['mailbox_id', 'idempotency_key'] && $index['name'] !== self::REQUEST_IDEMPOTENCY_INDEX) {
+                $connection->statement('drop index '.$grammar->wrap($index['name']).' on '.$table);
+            }
+        }
+        if (Schema::hasIndex('genai_mcp_requests', self::REQUEST_IDEMPOTENCY_INDEX)) {
+            return;
+        }
+        $connection->statement(
+            'create unique index '.$grammar->wrap(self::REQUEST_IDEMPOTENCY_INDEX).' on '.$table
+            .' ('.$grammar->wrap('mailbox_id').', '.$grammar->wrap('idempotency_key').')'
+            .' where '.$grammar->wrap('idempotency_key').' is not null'
+        );
     }
 
     /**
