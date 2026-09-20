@@ -548,10 +548,16 @@ three separate questions rather than one number:
 ```php
 $client::maxInlineFileBytes('application/pdf'); // decoded bytes for one inline block
 $client::maxUploadedFileBytes();                // decoded bytes via the File API, null when there is none
-$client::maxInlineBlocksPerMessage($mime);      // blocks of that kind per message, null when uncapped
+$client::maxInlineBlocksPerMessage($mime);      // blocks of that kind, null when uncapped
 $client::maxRequestBytes();                    // whole serialized request, null when uncapped
 $client::supportsFileApi();                     // whether uploadFile() will work at all
 ```
+
+Where a provider applies its block ceiling to the whole request rather than to
+one message — Bedrock Converse does, at five documents and twenty images — the
+client counts every message against it. A history whose turns are each under the
+cap can still exceed it once replayed, and it is refused before any document is
+converted or sent.
 
 Per-file limits are expressed in **decoded** bytes; `maxRequestBytes()` measures
 the finished serialized payload, because a file can sit under its own limit and

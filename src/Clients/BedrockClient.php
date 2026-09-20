@@ -104,7 +104,11 @@ class BedrockClient implements GenAiClient, HeartbeatAwareClient
         return null;
     }
 
-    /** Converse counts documents and images separately: five and twenty per message. */
+    /**
+     * Converse counts documents and images separately: five and twenty. Both
+     * ceilings apply to the whole request, so this client enforces them across
+     * every message rather than one message at a time.
+     */
     public static function maxInlineBlocksPerMessage(string $mimeType): ?int
     {
         return isset(self::MIME_TO_IMAGE_FORMAT[$mimeType]) ? 20 : 5;
@@ -396,37 +400,46 @@ class BedrockClient implements GenAiClient, HeartbeatAwareClient
     /** @param  list<array{role: string, content: list<ContentBlock>}>  $messages */
     private function convertMessages(array $messages): array
     {
-        return array_map(function (array $msg) {
-            $this->assertDocumentCountWithinLimit($msg['content']);
+        $this->assertBlockCountsWithinRequest($messages);
 
-            return [
-                'role' => $msg['role'],
-                'content' => array_map(
-                    fn (ContentBlock $b) => $this->contentBlockToBedrock($b),
-                    $msg['content'],
-                ),
-            ];
-        }, $messages);
+        return array_map(fn (array $msg) => [
+            'role' => $msg['role'],
+            'content' => array_map(
+                fn (ContentBlock $b) => $this->contentBlockToBedrock($b),
+                $msg['content'],
+            ),
+        ], $messages);
     }
 
     /**
-     * Documents and images are counted against their own separate caps.
+     * Documents and images are counted against their own separate caps, across
+     * every message in the request.
      *
-     * @param  list<ContentBlock>  $content
+     * Converse applies these ceilings to the complete request, not to each
+     * message, so a conversation whose turns are individually well under the
+     * cap can still exceed it once the history is replayed — and checking one
+     * message at a time passes exactly the request the provider rejects.
+     *
+     * Counted from the blocks rather than the serialized payload so the request
+     * is refused before any document is converted or sent.
+     *
+     * @param  list<array{role: string, content: list<ContentBlock>}>  $messages
      */
-    private function assertDocumentCountWithinLimit(array $content): void
+    private function assertBlockCountsWithinRequest(array $messages): void
     {
         $documents = 0;
         $images = 0;
 
-        foreach ($content as $block) {
-            if ($block->type !== ContentBlock::TYPE_DOCUMENT) {
-                continue;
-            }
-            if (isset(self::MIME_TO_IMAGE_FORMAT[(string) $block->mimeType])) {
-                $images++;
-            } else {
-                $documents++;
+        foreach ($messages as $message) {
+            foreach ($message['content'] as $block) {
+                if ($block->type !== ContentBlock::TYPE_DOCUMENT) {
+                    continue;
+                }
+                if (isset(self::MIME_TO_IMAGE_FORMAT[(string) $block->mimeType])) {
+                    $images++;
+                } else {
+                    $documents++;
+                }
             }
         }
 
@@ -441,11 +454,13 @@ class BedrockClient implements GenAiClient, HeartbeatAwareClient
         }
 
         throw new GenAiFatalException(sprintf(
-            'Bedrock Converse accepts at most %d %s blocks per message; this message has %d. '
-            .'Split them across turns or merge them before sending.',
+            'Bedrock Converse accepts at most %d %s blocks per request; this request has %d '
+            .'across its messages. Drop older turns from the history, or merge the %s blocks '
+            .'before sending.',
             $limit,
             $kind,
             $actual,
+            $kind,
         ));
     }
 
