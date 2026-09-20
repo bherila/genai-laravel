@@ -864,6 +864,21 @@ repository because no user account credentials are available to its test suite.
 | Auto DOC/DOCX → PDF (with phpword + dompdf) | ✅ | n/a | ✅ |
 | Auto XLSX/XLS/ODS/CSV → text (with phpspreadsheet) | ✅ | n/a | ✅ |
 
+## Upgrading from 0.2.x
+
+`EnqueueOptions::$maxAttempts` is now `?int` and defaults to `null`, meaning
+"no per-request override" rather than "three attempts". An omitted value is
+resolved from `GENAI_MCP_MAX_ATTEMPTS` at enqueue, so an options object built to
+set a queue or a priority no longer pins the attempt ceiling to 3 behind your
+back. Passing an explicit number still wins. Reading the property back can now
+return `null`, so code that did arithmetic on `$options->maxAttempts` needs to
+resolve it first.
+
+Two limits also got stricter, both rejecting earlier rather than differently:
+Bedrock counts its five-document and twenty-image ceilings across the whole
+request instead of per message, and a queued tool's `input_schema` must be a
+valid Draft 2020-12 object schema.
+
 ## Upgrading from 0.1.0
 
 The provider-drift fixes changed a few public signatures. All of them are
