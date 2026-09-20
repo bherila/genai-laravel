@@ -459,71 +459,75 @@ class BedrockClientTest extends TestCase
         $this->assertSame([], $this->makeClient()->extractToolCalls($response));
     }
 
-    // ── inline block ceilings apply to the whole request ─────────────────────
+    // ── inline block ceilings apply per message ──────────────────────────────
 
     /**
-     * Converse caps documents and images for the complete request. A history
-     * whose turns are each comfortably under the cap can still blow it once
-     * replayed, and checking a message at a time passes exactly the request
-     * the provider then rejects.
+     * Converse documents both ceilings on a single message's content array and
+     * documents no aggregate ceiling for the request, so a long history may
+     * legitimately carry far more than five documents in total.
+     *
+     * https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Message.html
      */
-    public function test_documents_are_counted_across_every_message_not_per_message(): void
+    public function test_documents_are_counted_per_message_not_across_the_history(): void
     {
         Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
 
-        // Six documents, three per message: under the cap of five per message,
-        // over it for the request.
-        $messages = [
-            ['role' => 'user', 'content' => $this->documents(3, 'application/pdf')],
-            ['role' => 'user', 'content' => $this->documents(3, 'application/pdf')],
-        ];
-
-        try {
-            $this->makeClient()->converse('', $messages);
-            $this->fail('Expected the aggregate document ceiling to be enforced.');
-        } catch (GenAiFatalException $e) {
-            $this->assertStringContainsString('at most 5 document blocks per request', $e->getMessage());
-            $this->assertStringContainsString('this request has 6', $e->getMessage());
-        }
-
-        Http::assertNothingSent();
-    }
-
-    public function test_images_are_counted_across_every_message_not_per_message(): void
-    {
-        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
-
-        $messages = [
-            ['role' => 'user', 'content' => $this->documents(11, 'image/png')],
-            ['role' => 'user', 'content' => $this->documents(10, 'image/png')],
-        ];
-
-        try {
-            $this->makeClient()->converse('', $messages);
-            $this->fail('Expected the aggregate image ceiling to be enforced.');
-        } catch (GenAiFatalException $e) {
-            $this->assertStringContainsString('at most 20 image blocks per request', $e->getMessage());
-            $this->assertStringContainsString('this request has 21', $e->getMessage());
-        }
-
-        Http::assertNothingSent();
-    }
-
-    public function test_a_request_exactly_on_both_ceilings_is_accepted(): void
-    {
-        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
-
+        // Six documents in total, three per message: over the cap for the
+        // request, under it for every message, and accepted by Converse.
         $this->makeClient()->converse('', [
             ['role' => 'user', 'content' => $this->documents(3, 'application/pdf')],
-            ['role' => 'user', 'content' => $this->documents(2, 'application/pdf')],
-            ['role' => 'user', 'content' => $this->documents(20, 'image/png')],
+            ['role' => 'user', 'content' => $this->documents(3, 'application/pdf')],
         ]);
 
         Http::assertSentCount(1);
     }
 
-    /** Documents and images have their own budgets; a full one does not spend the other. */
-    public function test_the_two_ceilings_are_counted_separately(): void
+    public function test_images_are_counted_per_message_not_across_the_history(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
+
+        $this->makeClient()->converse('', [
+            ['role' => 'user', 'content' => $this->documents(11, 'image/png')],
+            ['role' => 'user', 'content' => $this->documents(10, 'image/png')],
+        ]);
+
+        Http::assertSentCount(1);
+    }
+
+    public function test_a_single_message_over_the_document_ceiling_is_refused(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
+
+        try {
+            $this->makeClient()->converse('', [
+                ['role' => 'user', 'content' => $this->documents(6, 'application/pdf')],
+            ]);
+            $this->fail('Expected the per-message document ceiling to be enforced.');
+        } catch (GenAiFatalException $e) {
+            $this->assertStringContainsString('at most 5 document blocks per message', $e->getMessage());
+            $this->assertStringContainsString('this message has 6', $e->getMessage());
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_a_single_message_over_the_image_ceiling_is_refused(): void
+    {
+        Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
+
+        try {
+            $this->makeClient()->converse('', [
+                ['role' => 'user', 'content' => $this->documents(21, 'image/png')],
+            ]);
+            $this->fail('Expected the per-message image ceiling to be enforced.');
+        } catch (GenAiFatalException $e) {
+            $this->assertStringContainsString('at most 20 image blocks per message', $e->getMessage());
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_a_message_exactly_on_both_ceilings_is_accepted(): void
     {
         Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
 
@@ -537,11 +541,19 @@ class BedrockClientTest extends TestCase
         Http::assertSentCount(1);
     }
 
-    public function test_the_aggregate_ceiling_is_enforced_before_anything_is_sent(): void
+    /**
+     * Every message is checked before any is converted, so an offending turn
+     * late in the history costs nothing earlier in it.
+     */
+    public function test_a_late_offending_message_is_refused_before_anything_is_sent(): void
     {
         Http::fake(['*' => Http::response(['output' => ['message' => ['content' => [['text' => 'ok']]]]])]);
 
-        $messages = array_fill(0, 6, ['role' => 'user', 'content' => $this->documents(1, 'application/pdf')]);
+        $messages = [
+            ['role' => 'user', 'content' => $this->documents(1, 'application/pdf')],
+            ['role' => 'user', 'content' => $this->documents(1, 'application/pdf')],
+            ['role' => 'user', 'content' => $this->documents(6, 'application/pdf')],
+        ];
 
         $this->expectException(GenAiFatalException::class);
         try {
