@@ -97,6 +97,12 @@ final class SpreadsheetToText
             );
         }
 
+        // The archive's own central directory says what it will cost to open,
+        // and reading it is the only check that can happen before a parser
+        // materialises the contents. A decompression bomb is refused here or
+        // not at all.
+        $limits->assertArchiveWithinBounds(ZipBounds::read($bytes), 'spreadsheet');
+
         $tmp = tempnam(sys_get_temp_dir(), 'genai_xlsx_');
         if ($tmp === false) {
             throw new GenAiFatalException('SpreadsheetToText: failed to allocate temp file for conversion.');
@@ -130,6 +136,10 @@ final class SpreadsheetToText
                 // conversion fetch a URL the document chose.
                 $reader->setIncludeCharts(false);
                 $reader->setAllowExternalImages(false);
+                // Applied at load() so the ceilings bound what is read. Without
+                // it they bound only what is rendered, and a sheet with one
+                // value in its far corner is fully built before anything counts.
+                $reader->setReadFilter(BoundedReadFilter::for($limits));
                 $spreadsheet = $reader->load($tmp);
             } catch (\Throwable $e) {
                 throw new GenAiFatalException('SpreadsheetToText: failed to read spreadsheet — '.$e->getMessage(), 0, $e);

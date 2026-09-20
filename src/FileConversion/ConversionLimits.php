@@ -2,6 +2,10 @@
 
 namespace Bherila\GenAiLaravel\FileConversion;
 
+use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
+use Bherila\GenAiLaravel\FileLimits;
+
 /**
  * Best-effort resource ceilings for Office-document conversion.
  *
@@ -10,20 +14,24 @@ namespace Bherila\GenAiLaravel\FileConversion;
  * would otherwise pin a worker for ten minutes. Defaults are generous for real
  * business documents and well below what it takes to hurt a process.
  *
- * They are **not a security boundary**, and this package does not claim one.
- * Only $maxInputBytes applies before the document reaches the parser; everything
- * else is checked while walking a workbook PhpSpreadsheet has already opened, or
- * against output PhpWord has already rendered. XLSX and DOCX are ZIP containers,
- * and both libraries materialise their contents in-process before any traversal
- * limit here can run — so a decompression bomb sized just under $maxInputBytes
- * can still exhaust memory, and no ceiling in this class will stop it.
+ * Most of them are **not a security boundary**. $maxInputBytes and the archive
+ * bounds below apply before the document reaches the parser; everything else is
+ * checked while walking a workbook PhpSpreadsheet has already opened, or against
+ * output PhpWord has already rendered, and neither library is interruptible once
+ * inside a parse.
  *
- * Converting documents from people you do not trust needs isolation this package
- * cannot provide from inside your worker: run the conversion in a separate
- * process with an enforced memory cap and CPU/wall-clock limit (a dedicated
- * queue worker with a low `memory_limit`, a container with `--memory`, a
- * `ulimit -v` wrapper), and treat a killed process as a rejected upload. Tighten
- * the values here as a first filter on top of that, not in place of it.
+ * The archive bounds close the case that used to be unanswerable here. XLSX,
+ * DOCX and ODS are ZIP containers, and both libraries materialise their contents
+ * in-process, so a decompression bomb sized just under $maxInputBytes exhausted
+ * memory before any traversal ceiling could run. {@see assertArchiveWithinBounds}
+ * reads what the container declares about itself and refuses it first.
+ *
+ * That is a filter, not a sandbox: a parser can still be pathological on input
+ * that declares nothing unusual. For documents from people you do not trust, run
+ * the conversion through {@see IsolatedConverter}, which executes it in a child
+ * process under a kernel-enforced memory cap and wall-clock limit and treats a
+ * killed child as a rejected upload. These ceilings then act as the cheap first
+ * filter in front of it, which is what they are good at.
  */
 final class ConversionLimits
 {
@@ -37,6 +45,10 @@ final class ConversionLimits
      *                             this package holds control — it cannot interrupt a
      *                             parse or a render already running inside PhpSpreadsheet,
      *                             PhpWord or the PDF renderer.
+     * @param  int  $maxArchiveEntries  Files a ZIP container (xlsx, docx, ods) may declare.
+     * @param  int  $maxUncompressedBytes  What that container may declare it expands to.
+     * @param  int  $maxCompressionRatio  How far it may expand. Real Office documents sit
+     *                                    in the low tens; a bomb is in the thousands.
      */
     public function __construct(
         public readonly int $maxInputBytes = 33_554_432,      // 32 MB
@@ -44,7 +56,81 @@ final class ConversionLimits
         public readonly int $maxRowsPerSheet = 100_000,
         public readonly int $maxCells = 2_000_000,
         public readonly float $maxSeconds = 60.0,
+        public readonly int $maxArchiveEntries = 4_096,
+        public readonly int $maxUncompressedBytes = 536_870_912, // 512 MB
+        public readonly int $maxCompressionRatio = 200,
     ) {}
+
+    /**
+     * Refuse a ZIP container whose own central directory says it will cost more
+     * than these limits allow.
+     *
+     * This runs before a parser opens the file, which is the whole point: it is
+     * the only check in this class that can stop a decompression bomb, because
+     * every other ceiling here is applied to a workbook already in memory.
+     *
+     * Bounds that cannot be read are not bounds that passed. A container this
+     * reader does not understand — ZIP64, damaged, or not a ZIP at all — is
+     * left to the caller to decide about, since a CSV is not an archive and
+     * refusing it here would be wrong.
+     *
+     * @throws GenAiFileTooLargeException when the archive declares more than is allowed.
+     */
+    public function assertArchiveWithinBounds(?ZipBounds $bounds, string $what = 'document'): void
+    {
+        if ($bounds === null) {
+            return;
+        }
+
+        if ($bounds->unsafeNames !== []) {
+            throw new GenAiFatalException(sprintf(
+                'The %s archive names an entry outside its own root (%s), which no Office document does.',
+                $what,
+                implode(', ', array_slice($bounds->unsafeNames, 0, 3)),
+            ));
+        }
+        if ($bounds->duplicateNames !== []) {
+            throw new GenAiFatalException(sprintf(
+                'The %s archive records %s more than once; duplicate entries make its contents ambiguous.',
+                $what,
+                implode(', ', array_slice($bounds->duplicateNames, 0, 3)),
+            ));
+        }
+        if ($bounds->entries > $this->maxArchiveEntries) {
+            throw new GenAiFileTooLargeException(
+                sprintf(
+                    'The %s archive declares %d entries, above the limit of %d.',
+                    $what, $bounds->entries, $this->maxArchiveEntries,
+                ),
+                actualBytes: $bounds->entries,
+                limitBytes: $this->maxArchiveEntries,
+            );
+        }
+        if ($bounds->uncompressedBytes > $this->maxUncompressedBytes) {
+            throw new GenAiFileTooLargeException(
+                sprintf(
+                    'The %s archive expands to %s, above the %s limit — it would be opened in memory before any other ceiling applies.',
+                    $what,
+                    FileLimits::humanBytes($bounds->uncompressedBytes),
+                    FileLimits::humanBytes($this->maxUncompressedBytes),
+                ),
+                actualBytes: $bounds->uncompressedBytes,
+                limitBytes: $this->maxUncompressedBytes,
+            );
+        }
+        if ($bounds->compressionRatio() > $this->maxCompressionRatio) {
+            throw new GenAiFileTooLargeException(
+                sprintf(
+                    'The %s archive expands %dx, past the %dx limit. Real Office documents sit far below this.',
+                    $what,
+                    (int) $bounds->compressionRatio(),
+                    $this->maxCompressionRatio,
+                ),
+                actualBytes: $bounds->uncompressedBytes,
+                limitBytes: $this->maxUncompressedBytes,
+            );
+        }
+    }
 
     /**
      * A copy whose output ceiling is at most $bytes.
@@ -61,6 +147,9 @@ final class ConversionLimits
             maxRowsPerSheet: $this->maxRowsPerSheet,
             maxCells: $this->maxCells,
             maxSeconds: $this->maxSeconds,
+            maxArchiveEntries: $this->maxArchiveEntries,
+            maxUncompressedBytes: $this->maxUncompressedBytes,
+            maxCompressionRatio: $this->maxCompressionRatio,
         );
     }
 
@@ -83,6 +172,9 @@ final class ConversionLimits
             maxRowsPerSheet: (int) ($cfg['max_rows_per_sheet'] ?? $defaults->maxRowsPerSheet),
             maxCells: (int) ($cfg['max_cells'] ?? $defaults->maxCells),
             maxSeconds: (float) ($cfg['max_seconds'] ?? $defaults->maxSeconds),
+            maxArchiveEntries: (int) ($cfg['max_archive_entries'] ?? $defaults->maxArchiveEntries),
+            maxUncompressedBytes: (int) ($cfg['max_uncompressed_bytes'] ?? $defaults->maxUncompressedBytes),
+            maxCompressionRatio: (int) ($cfg['max_compression_ratio'] ?? $defaults->maxCompressionRatio),
         );
     }
 }

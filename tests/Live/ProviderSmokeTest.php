@@ -5,6 +5,7 @@ namespace Bherila\GenAiLaravel\Tests\Live;
 use Bherila\GenAiLaravel\Clients\AnthropicClient;
 use Bherila\GenAiLaravel\Clients\BedrockClient;
 use Bherila\GenAiLaravel\Clients\GeminiClient;
+use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\GenAiRequest;
 use Orchestra\Testbench\TestCase;
@@ -129,6 +130,55 @@ class ProviderSmokeTest extends TestCase
             // Text answers, not JSON — the default MIME forcing would wrap them.
             responseMimeType: null,
         );
+    }
+
+    /**
+     * Settles the open question in #24: does Converse apply its five-document
+     * ceiling per message or across the whole request?
+     *
+     * AWS documents the restriction on a single Message's content array, so
+     * six documents spread over two messages should be accepted. If that is
+     * wrong, Bedrock answers with a ValidationException and the failure
+     * message below says so in as many words — at which point the aggregate
+     * check removed in #54 should come back.
+     *
+     * Deliberately small documents: this asks a question about counting, not
+     * about bytes.
+     */
+    public function test_bedrock_accepts_six_documents_spread_across_two_messages(): void
+    {
+        $client = $this->bedrock();
+
+        $document = static fn (int $n): ContentBlock => ContentBlock::document(
+            base64_encode("Document {$n}. The answer for document {$n} is {$n}."),
+            'text/plain',
+            "doc-{$n}.txt",
+        );
+
+        try {
+            $response = $client->converse('', [
+                ['role' => 'user', 'content' => [
+                    $document(1), $document(2), $document(3),
+                    ContentBlock::text('Here are the first three documents.'),
+                ]],
+                ['role' => 'assistant', 'content' => [ContentBlock::text('Noted.')]],
+                ['role' => 'user', 'content' => [
+                    $document(4), $document(5), $document(6),
+                    ContentBlock::text('How many documents have I sent in total? Answer with the number alone.'),
+                ]],
+            ]);
+        } catch (\Throwable $e) {
+            $this->fail(
+                'Converse refused six documents spread across two messages: '.$e->getMessage()
+                ."\n\nIf this is a ValidationException about the document count, the ceiling is "
+                .'per request after all, and the aggregate check removed in #54 should be restored '
+                .'(see issue #24).',
+            );
+        }
+
+        // Not throwing is the result: Converse accepted six documents across
+        // two messages. The answer itself only confirms the model saw them.
+        $this->assertNotSame('', trim($client->extractText($response)), 'Converse accepted the request but returned no text.');
     }
 
     private function anthropic(): AnthropicClient
