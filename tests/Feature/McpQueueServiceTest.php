@@ -21,6 +21,7 @@ use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
 use Bherila\GenAiLaravel\Mcp\PendingGenAiRequest;
+use Bherila\GenAiLaravel\Mcp\StoredAttachment;
 use Bherila\GenAiLaravel\Schema;
 use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
@@ -246,6 +247,68 @@ final class McpQueueServiceTest extends TestCase
         $this->assertNull($this->app->make(McpQueueService::class)->claim($stranger));
 
         $this->assertSame(McpRequestStatus::Pending, McpRequest::query()->findOrFail($pending->id)->status);
+    }
+
+    public function test_prune_keeps_request_metadata_when_owned_deletion_fails_then_retries(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context);
+        $service->complete($this->context, $pending->id, $claim['request']['lease_token'], ['text' => 'Done']);
+        McpDelivery::query()->where('request_id', $pending->id)->update(['acknowledged_at' => now()]);
+        $this->travel(31)->days();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldReceive('delete')->twice()->andReturnValues([false, true]);
+        Storage::shouldReceive('disk')->with('local')->andReturn($disk);
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+        $this->assertDatabaseHas('genai_mcp_requests', ['id' => $pending->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 1);
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+        $this->assertDatabaseMissing('genai_mcp_requests', ['id' => $pending->id]);
+    }
+
+    public function test_prune_keeps_request_metadata_when_owned_deletion_throws(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->withFile(base64_encode('bytes'), 'application/pdf')->prompt('Read it')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context);
+        $service->complete($this->context, $pending->id, $claim['request']['lease_token'], ['text' => 'Done']);
+        McpDelivery::query()->where('request_id', $pending->id)->update(['acknowledged_at' => now()]);
+        $this->travel(31)->days();
+
+        $failing = \Mockery::mock(Filesystem::class);
+        $failing->shouldReceive('delete')->once()->andThrow(new \RuntimeException('disk offline'));
+        Storage::shouldReceive('disk')->with('local')->andReturn($failing);
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+
+        $this->assertDatabaseHas('genai_mcp_requests', ['id' => $pending->id]);
+        $this->assertDatabaseCount('genai_mcp_attachments', 1);
+    }
+
+    public function test_prune_never_deletes_host_owned_attachment_bytes(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->withStoredAttachment(new StoredAttachment('report.pdf', 'application/pdf', 12, str_repeat('a', 64), hostReference: 'document:7'))
+            ->prompt('Read it')->enqueue();
+        $service = $this->app->make(McpQueueService::class);
+        $claim = $service->claim($this->context);
+        $service->complete($this->context, $pending->id, $claim['request']['lease_token'], ['text' => 'Done']);
+        McpDelivery::query()->where('request_id', $pending->id)->update(['acknowledged_at' => now()]);
+        $this->travel(31)->days();
+
+        $disk = \Mockery::mock(Filesystem::class);
+        $disk->shouldNotReceive('delete');
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $this->artisan('genai:mcp:prune')->assertSuccessful();
+
+        $this->assertDatabaseMissing('genai_mcp_requests', ['id' => $pending->id]);
     }
 
     public function test_prune_transactionally_expires_request_level_deadlines(): void

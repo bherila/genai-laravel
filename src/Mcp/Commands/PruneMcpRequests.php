@@ -11,6 +11,7 @@ use Bherila\GenAiLaravel\Mcp\Models\McpToken;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Throwable;
 
 final class PruneMcpRequests extends Command
 {
@@ -71,20 +72,52 @@ final class PruneMcpRequests extends Command
         } while ($finalized === 100);
 
         $before = now()->subDays((int) config('genai.mcp.retention.terminal_days', 30));
+        $retained = 0;
         McpRequest::query()->whereIn('status', [McpRequestStatus::Completed->value, McpRequestStatus::Failed->value, McpRequestStatus::Cancelled->value, McpRequestStatus::Expired->value])
             ->where('updated_at', '<', $before)
             ->whereDoesntHave('deliveries', fn ($q) => $q->whereNull('acknowledged_at'))
-            ->with('attachments')->eachById(function (McpRequest $request): void {
-                foreach ($request->attachments as $attachment) {
-                    if ($attachment->package_owned && $attachment->disk !== null && $attachment->path !== null) {
-                        Storage::disk($attachment->disk)->delete($attachment->path);
-                    }
+            ->with('attachments')->eachById(function (McpRequest $request) use (&$retained): void {
+                if (! $this->deleteOwnedObjects($request)) {
+                    $retained++;
+
+                    return;
                 }
                 $request->delete();
             });
         McpToken::query()->whereNotNull('revoked_at')->where('revoked_at', '<', $before)->delete();
-        $this->info('GenAI MCP retention pass completed.');
+        $this->info($retained === 0
+            ? 'GenAI MCP retention pass completed.'
+            : "GenAI MCP retention pass completed; {$retained} request(s) retained because package-owned objects could not be deleted.");
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Delete every package-owned object of a request, reporting whether they
+     * are all gone. Host-owned attachments are never touched: the package only
+     * holds an opaque reference to them.
+     *
+     * The request and attachment rows are the only record of the bytes this
+     * package put on disk, so a transient storage failure must leave them in
+     * place for the next pass to retry. Deleting them now would turn a
+     * recoverable failure into a permanent, untracked orphan.
+     */
+    private function deleteOwnedObjects(McpRequest $request): bool
+    {
+        $complete = true;
+        foreach ($request->attachments as $attachment) {
+            if (! $attachment->package_owned || $attachment->disk === null || $attachment->path === null) {
+                continue;
+            }
+            try {
+                $deleted = Storage::disk($attachment->disk)->delete($attachment->path);
+            } catch (Throwable $exception) {
+                $deleted = false;
+                $this->warn("Could not delete {$attachment->disk}:{$attachment->path} — {$exception->getMessage()}");
+            }
+            $complete = $deleted && $complete;
+        }
+
+        return $complete;
     }
 }
