@@ -850,6 +850,39 @@ final class McpQueueServiceTest extends TestCase
             ->prompt('Read it')->enqueue();
     }
 
+    public function test_rest_rejects_an_array_queue_filter_with_a_structured_422(): void
+    {
+        $this->mailbox();
+
+        $this->getJson('/genai/mcp/v1/queue/status?queue[]=a&queue[]=b')
+            ->assertStatus(422)->assertJsonPath('details.field', 'queue');
+        $this->postJson('/genai/mcp/v1/claims', ['queue' => ['a', 'b']])
+            ->assertStatus(422)->assertJsonPath('details.field', 'queue');
+    }
+
+    public function test_rest_rejects_array_failure_fields_with_a_structured_422(): void
+    {
+        $pending = GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))
+            ->prompt('Read it')->enqueue();
+        $claim = $this->app->make(McpQueueService::class)->claim($this->context);
+
+        $this->postJson('/genai/mcp/v1/requests/'.$pending->id.'/fail', [
+            'lease_token' => $claim['request']['lease_token'],
+            'error' => ['code' => ['nope'], 'message' => 'broke'],
+            'retryable' => false,
+        ])->assertStatus(422)->assertJsonPath('details.field', 'error.code');
+
+        $this->assertSame(McpRequestStatus::Leased, $pending->status());
+    }
+
+    public function test_rest_still_accepts_a_string_queue_filter(): void
+    {
+        $this->mailbox();
+
+        $this->getJson('/genai/mcp/v1/queue/status?queue=invoices')->assertOk();
+        $this->postJson('/genai/mcp/v1/claims', ['queue' => 'invoices'])->assertNoContent();
+    }
+
     private function pendingWithNestedObjectTool(): PendingGenAiRequest
     {
         return GenAiRequest::with($this->app->make(McpClientFactory::class)->forMailbox($this->mailbox()))

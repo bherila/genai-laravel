@@ -16,7 +16,10 @@ final readonly class McpApiController
 
     public function status(Request $request): JsonResponse
     {
-        return $this->respond(fn (): array => ['counts' => $this->queue->status($this->context($request), $request->query('queue'))]);
+        return $this->respond(fn (): array => ['counts' => $this->queue->status(
+            $this->context($request),
+            $this->nullableString($request->query('queue'), 'queue'),
+        )]);
     }
 
     public function show(Request $request, string $requestId): JsonResponse
@@ -28,7 +31,11 @@ final readonly class McpApiController
     {
         try {
             $this->assertKeys($request, ['queue']);
-            $envelope = $this->queue->claim($this->context($request), $request->input('queue'), $request->header('Idempotency-Key'));
+            $envelope = $this->queue->claim(
+                $this->context($request),
+                $this->nullableString($request->input('queue'), 'queue'),
+                $request->header('Idempotency-Key'),
+            );
 
             return $envelope === null ? response('', 204) : response()->json($envelope);
         } catch (McpQueueException $e) {
@@ -89,7 +96,8 @@ final readonly class McpApiController
 
             return $this->queue->fail(
                 $this->context($request), $requestId, $leaseToken,
-                (string) $request->input('error.code', 'executor_error'), (string) $request->input('error.message', 'Executor reported a failure.'),
+                $this->nullableString($request->input('error.code'), 'error.code') ?? 'executor_error',
+                $this->nullableString($request->input('error.message'), 'error.message') ?? 'Executor reported a failure.',
                 (bool) $request->boolean('retryable'),
             );
         });
@@ -123,6 +131,21 @@ final readonly class McpApiController
         } catch (McpQueueException $e) {
             return response()->json(['message' => $e->getMessage(), 'details' => $e->details], $e->httpStatus);
         }
+    }
+
+    /**
+     * A field that reaches a nullable string service parameter. Query strings
+     * and JSON bodies can both carry an array where one value is expected, and
+     * passing that straight through is a 500 rather than the structured refusal
+     * the caller can act on.
+     */
+    private function nullableString(mixed $value, string $field): ?string
+    {
+        if ($value === null || is_string($value)) {
+            return $value;
+        }
+
+        throw new McpQueueException("The {$field} value must be a string.", 422, ['field' => $field]);
     }
 
     /** @return array<string, mixed>|null */
