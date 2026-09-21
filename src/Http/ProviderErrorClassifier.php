@@ -175,7 +175,10 @@ final class ProviderErrorClassifier
         if (self::matchesAny($detail, [
             '/provided model identifier is invalid/i',
             '/could not resolve the foundation model/i',
-            '/with on-demand throughput is\W?n.?t supported/i',
+            // Matched on the stable half of the sentence: the apostrophe in
+            // "isn't" arrives as ASCII or as U+2019 depending on the caller's
+            // encoding, and a pattern that spans it is a pattern that breaks.
+            '/with on-demand throughput/i',
         ])) {
             return new GenAiModelUnavailableException($message, $provider, $modelId);
         }

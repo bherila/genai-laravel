@@ -99,6 +99,13 @@ class ProviderErrorClassificationTest extends TestCase
                 '{"message":"Invocation of model ID anthropic.claude-3-5-sonnet-20241022-v2:0 with on-demand throughput isn\'t supported. Retry your request with the ID or ARN of an inference profile that contains this model."}',
                 ['x-amzn-ErrorType' => 'ValidationException'],
             ],
+            // Same message with a typographic apostrophe, which the pattern must
+            // not depend on.
+            'bedrock 400 on-demand throughput message with a curly apostrophe' => [
+                'bedrock', 'anthropic.claude-3-5-sonnet-20241022-v2:0', 400,
+                '{"message":"Invocation of model ID anthropic.claude-3-5-sonnet-20241022-v2:0 with on-demand throughput isn’t supported."}',
+                ['x-amzn-ErrorType' => 'ValidationException'],
+            ],
             // A 403 that names the model as inaccessible is the model's problem,
             // not the credential's: enabling model access fixes it.
             'bedrock 403 AccessDeniedException naming model access' => [
