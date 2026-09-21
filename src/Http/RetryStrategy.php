@@ -34,6 +34,9 @@ class RetryStrategy
     public const FATAL_STATUSES = [400, 401, 403, 404];
 
     /**
+     * `$provider` and `$modelId` are the only properties here that are not
+     * readonly, because `forProvider()` rebinds them on a clone — see there.
+     *
      * @param  Closure(int):void|null  $sleeper  Override `usleep()` for tests.
      * @param  string|null  $provider  Provider slug (`anthropic`, `bedrock`, `gemini`)
      *                                 whose error vocabulary applies to these responses.
@@ -44,9 +47,21 @@ class RetryStrategy
         public readonly int $backoffBaseMs = 1000,
         public readonly int $backoffMaxMs = 30_000,
         private readonly ?Closure $sleeper = null,
-        public readonly ?string $provider = null,
-        public readonly ?string $modelId = null,
+        private ?string $provider = null,
+        private ?string $modelId = null,
     ) {}
+
+    /** Provider slug whose error vocabulary this strategy applies, if bound. */
+    public function provider(): ?string
+    {
+        return $this->provider;
+    }
+
+    /** Model id this strategy names on a configuration failure, if bound. */
+    public function modelId(): ?string
+    {
+        return $this->modelId;
+    }
 
     /**
      * Copy of this strategy bound to a provider and model.
@@ -54,18 +69,24 @@ class RetryStrategy
      * Retry behaviour is configuration a host owns and may inject, while the
      * provider and model are facts the client owns, so a client binds them to
      * whatever strategy it was handed rather than requiring the host to pass
-     * them in. Returns a new instance: the original stays reusable.
+     * them in.
+     *
+     * The copy is a `clone`, deliberately, not a freshly constructed `self`: an
+     * application may hand a client its own subclass — a different transport,
+     * its own instrumentation, a test double — and rebuilding the base class
+     * here would discard it, leaving the override silently unused. Cloning keeps
+     * the concrete class and every property it added; only the binding differs,
+     * and the original instance stays reusable.
+     *
+     * @return static
      */
     public function forProvider(string $provider, ?string $modelId = null): self
     {
-        return new self(
-            maxAttempts: $this->maxAttempts,
-            backoffBaseMs: $this->backoffBaseMs,
-            backoffMaxMs: $this->backoffMaxMs,
-            sleeper: $this->sleeper,
-            provider: $provider,
-            modelId: $modelId,
-        );
+        $bound = clone $this;
+        $bound->provider = $provider;
+        $bound->modelId = $modelId;
+
+        return $bound;
     }
 
     /**

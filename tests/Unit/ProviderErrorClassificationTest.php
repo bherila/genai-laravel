@@ -13,9 +13,12 @@ use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiModelUnavailableException;
 use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
 use Bherila\GenAiLaravel\Http\RetryStrategy;
+use Closure;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Orchestra\Testbench\TestCase;
 use PHPUnit\Framework\Attributes\DataProvider;
+use ReflectionProperty;
 use Throwable;
 
 /**
@@ -396,6 +399,57 @@ class ProviderErrorClassificationTest extends TestCase
         }
     }
 
+    public function test_binding_keeps_an_injected_strategy_subclass(): void
+    {
+        // A host may inject its own RetryStrategy subclass — a different
+        // transport, its own counters, a test double. Binding the provider and
+        // model must not quietly swap that implementation for the base class:
+        // the override would stop running and nothing would say so.
+        Http::fake(['*' => Http::response('{"type":"error","error":{"type":"not_found_error","message":"model: claude-retired-1"}}', 404)]);
+
+        $anthropic = new AnthropicClient(
+            apiKey: 'test-key',
+            model: 'claude-retired-1',
+            retry: new RecordingRetryStrategy('host-owned'),
+        );
+        $bedrock = new BedrockClient(
+            apiKey: 'test-key',
+            modelId: 'anthropic.claude-typo-v1:0',
+            region: 'us-east-1',
+            retry: new RecordingRetryStrategy('host-owned'),
+        );
+        $gemini = new GeminiClient(
+            apiKey: 'test-key',
+            model: 'gemini-retired-pro',
+            retry: new RecordingRetryStrategy('host-owned'),
+        );
+
+        foreach ([
+            [$anthropic, AnthropicClient::class],
+            [$bedrock, BedrockClient::class],
+            [$gemini, GeminiClient::class],
+        ] as [$client, $class]) {
+            $bound = (new ReflectionProperty($class, 'retry'))->getValue($client);
+
+            $this->assertInstanceOf(RecordingRetryStrategy::class, $bound, "{$class} replaced the injected strategy.");
+            $this->assertSame('host-owned', $bound->label, "{$class} dropped the injected strategy's own state.");
+        }
+
+        // …and the subclass's execute() is still the code path that runs, while
+        // classification through parent::execute() still names the model.
+        $bound = (new ReflectionProperty(AnthropicClient::class, 'retry'))->getValue($anthropic);
+
+        try {
+            $anthropic->converse('', [['role' => 'user', 'content' => [ContentBlock::text('hi')]]]);
+            $this->fail('Expected GenAiModelUnavailableException');
+        } catch (GenAiModelUnavailableException $e) {
+            $this->assertSame('anthropic', $e->provider);
+            $this->assertSame('claude-retired-1', $e->modelId);
+        }
+
+        $this->assertSame(['Anthropic Messages'], $bound->seen, 'The injected override must be the code path that ran.');
+    }
+
     public function test_gemini_client_reports_its_configured_model(): void
     {
         Http::fake(['*' => Http::response('{"error":{"code":404,"message":"models/gemini-retired-pro is not found for API version v1beta, or is not supported for generateContent.","status":"NOT_FOUND"}}', 404)]);
@@ -415,5 +469,28 @@ class ProviderErrorClassificationTest extends TestCase
             // id reported back is the one the client actually calls with.
             $this->assertSame('gemini-retired-pro', $e->modelId);
         }
+    }
+}
+
+/**
+ * Stand-in for a host's own strategy: an overridden transport plus state of its
+ * own. Used to prove that binding a provider and model keeps the instance a
+ * host supplied rather than substituting the base class.
+ */
+final class RecordingRetryStrategy extends RetryStrategy
+{
+    /** @var list<string> */
+    public array $seen = [];
+
+    public function __construct(public readonly string $label)
+    {
+        parent::__construct(maxAttempts: 1);
+    }
+
+    public function execute(callable $send, string $errorContext, ?Closure $heartbeat = null): Response
+    {
+        $this->seen[] = $errorContext;
+
+        return parent::execute($send, $errorContext, $heartbeat);
     }
 }

@@ -490,8 +490,10 @@ inferred from the status alone except `401`, which all three providers document
 as a credential failure.
 
 `$provider` and `$modelId` are populated when the exception came from a client;
-each binds its own with `RetryStrategy::forProvider()`. A `RetryStrategy` used
-directly without that binding reports `null` and classifies nothing but `401`.
+each binds its own with `RetryStrategy::forProvider()`, which *clones* the
+strategy it was handed — inject your own `RetryStrategy` subclass and the client
+keeps that instance, overrides and state included. A `RetryStrategy` used
+directly, without the binding, reports `null` and classifies nothing but `401`.
 
 ## Listing models
 
