@@ -130,7 +130,9 @@ class AnthropicClient implements GenAiClient, HeartbeatAwareClient
             'anthropic-beta' => self::FILES_API_BETA,
             'Content-Type' => 'application/json',
         ])->timeout($timeout);
-        $this->retry = $retry ?? RetryStrategy::fromConfig();
+        // Bound to provider + model so a rejected model id or credential comes back
+        // as a GenAiConfigurationException instead of an unclassified fatal.
+        $this->retry = ($retry ?? RetryStrategy::fromConfig())->forProvider($this->provider(), $this->model);
     }
 
     public function provider(): string
