@@ -200,6 +200,27 @@ class ProviderErrorClassificationTest extends TestCase
                 '{"error":{"code":403,"message":"Permission denied: Consumer has been suspended.","status":"PERMISSION_DENIED"}}',
                 [],
             ],
+            // The catalog calls share the bound strategy, so the configured
+            // model id is attached to a request that never named a model. A
+            // permission failure whose text merely contains "models" is the
+            // credential's problem.
+            'anthropic 403 permission_error while listing models' => [
+                'anthropic', 403,
+                '{"type":"error","error":{"type":"permission_error","message":"Your API key does not have permission to list models."}}',
+                [],
+            ],
+            'gemini 403 PERMISSION_DENIED on the ListModels method' => [
+                'gemini', 403,
+                '{"error":{"code":403,"message":"Permission denied on resource method google.ai.generativelanguage.v1beta.ModelService.ListModels.","status":"PERMISSION_DENIED"}}',
+                [],
+            ],
+            // A permission name that happens to carry the word, on a collection
+            // path with no model id after it.
+            'gemini 403 PERMISSION_DENIED naming a models permission' => [
+                'gemini', 403,
+                '{"error":{"code":403,"message":"Caller does not have permission generativelanguage.models.list on resource generativelanguage.googleapis.com/models.","status":"PERMISSION_DENIED"}}',
+                [],
+            ],
         ];
     }
 
@@ -469,6 +490,124 @@ class ProviderErrorClassificationTest extends TestCase
             // id reported back is the one the client actually calls with.
             $this->assertSame('gemini-retired-pro', $e->modelId);
         }
+    }
+
+    // ── catalog calls carry a model id they never asked about ────────────────
+
+    /**
+     * listModels() runs through the *same* bound RetryStrategy as converse(),
+     * so the configured provider and model id are attached to a request that
+     * names no model at all. A permission failure on the listing endpoint must
+     * not be promoted to "the configured model is unavailable": the model is
+     * fine, the credential is not, and an operator sent after the model id
+     * would be looking in the wrong place.
+     */
+    public function test_anthropic_permission_failure_while_listing_models_is_not_a_model_failure(): void
+    {
+        Http::fake(['*' => Http::response(
+            '{"type":"error","error":{"type":"permission_error","message":"Your API key does not have permission to list models."}}',
+            403,
+        )]);
+
+        $client = new AnthropicClient(
+            apiKey: 'test-key',
+            model: 'claude-sonnet-4-6',
+            retry: new RetryStrategy(maxAttempts: 1),
+        );
+
+        try {
+            $client->listModels();
+            $this->fail('Expected the listing to fail.');
+        } catch (GenAiFatalException $e) {
+            $this->assertNotInstanceOf(
+                GenAiModelUnavailableException::class,
+                $e,
+                'A 403 on the catalog endpoint says nothing about the configured model.',
+            );
+            $this->assertInstanceOf(GenAiAuthenticationException::class, $e);
+            $this->assertSame('anthropic', $e->provider);
+            $this->assertSame(403, $e->status);
+        }
+    }
+
+    public function test_gemini_permission_failure_while_listing_models_is_not_a_model_failure(): void
+    {
+        Http::fake(['*' => Http::response(
+            '{"error":{"code":403,"message":"Permission \'generativelanguage.models.list\' denied on resource \'//generativelanguage.googleapis.com/models\' (or it may not exist).","status":"PERMISSION_DENIED"}}',
+            403,
+        )]);
+
+        $client = new GeminiClient(
+            apiKey: 'test-key',
+            model: 'gemini-3.6-flash',
+            retry: new RetryStrategy(maxAttempts: 1),
+        );
+
+        try {
+            $client->listModels();
+            $this->fail('Expected the listing to fail.');
+        } catch (GenAiFatalException $e) {
+            $this->assertNotInstanceOf(
+                GenAiModelUnavailableException::class,
+                $e,
+                'A 403 on the catalog endpoint says nothing about the configured model.',
+            );
+            $this->assertInstanceOf(GenAiAuthenticationException::class, $e);
+            $this->assertSame('gemini', $e->provider);
+            $this->assertSame(403, $e->status);
+        }
+    }
+
+    // ── positive controls for the narrowed attribution ───────────────────────
+
+    /**
+     * @param  array<string, string>  $headers
+     */
+    #[DataProvider('modelResourceFixtures')]
+    public function test_a_single_model_resource_still_classifies_without_a_configured_id(string $provider, int $status, string $body, array $headers): void
+    {
+        // Narrowing the fallback must not cost the case it exists for: a client
+        // with no model id bound still gets the model verdict when the provider
+        // names one model in its own resource form.
+        $e = $this->failWith($status, $body, $headers, $provider, null);
+
+        $this->assertInstanceOf(GenAiModelUnavailableException::class, $e);
+        $this->assertSame($provider, $e->provider);
+        $this->assertNull($e->modelId);
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: int, 2: string, 3: array<string, string>}>
+     */
+    public static function modelResourceFixtures(): array
+    {
+        return [
+            'anthropic 404 naming the model in its "model: <id>" form' => [
+                'anthropic', 404,
+                '{"type":"error","error":{"type":"not_found_error","message":"model: claude-retired-1"}}',
+                [],
+            ],
+            'gemini 404 naming the models/<id> resource' => [
+                'gemini', 404,
+                '{"error":{"code":404,"message":"models/gemini-retired-pro is not found for API version v1beta, or is not supported for generateContent.","status":"NOT_FOUND"}}',
+                [],
+            ],
+        ];
+    }
+
+    public function test_a_configured_id_is_matched_as_a_whole_token(): void
+    {
+        // A short configured id must not be found inside an unrelated word: the
+        // substring test that preceded this matched "pro" in "provider".
+        $e = $this->failWith(
+            404,
+            '{"error":{"code":404,"message":"The requested provider resource could not be found.","status":"NOT_FOUND"}}',
+            [],
+            'gemini',
+            'pro',
+        );
+
+        $this->assertSame(GenAiFatalException::class, $e::class);
     }
 }
 

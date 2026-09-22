@@ -120,10 +120,10 @@ final class ProviderErrorClassifier
 
         return match ($type) {
             'authentication_error' => new GenAiAuthenticationException($message, $provider, $status),
-            'permission_error' => self::namesModel($detail, $modelId)
+            'permission_error' => self::namesModel($detail, $modelId, $provider)
                 ? new GenAiModelUnavailableException($message, $provider, $modelId)
                 : new GenAiAuthenticationException($message, $provider, $status),
-            'not_found_error' => self::namesModel($detail, $modelId)
+            'not_found_error' => self::namesModel($detail, $modelId, $provider)
                 ? new GenAiModelUnavailableException($message, $provider, $modelId)
                 : null,
             // invalid_request_error (400) is the payload bucket — prefill on a
@@ -256,10 +256,10 @@ final class ProviderErrorClassifier
             return match ($code) {
                 'model_not_found' => new GenAiModelUnavailableException($message, $provider, $modelId),
                 'authentication' => new GenAiAuthenticationException($message, $provider, $status),
-                'permission_denied' => self::namesModel($detail, $modelId)
+                'permission_denied' => self::namesModel($detail, $modelId, $provider)
                     ? new GenAiModelUnavailableException($message, $provider, $modelId)
                     : new GenAiAuthenticationException($message, $provider, $status),
-                'not_found' => self::namesModel($detail, $modelId)
+                'not_found' => self::namesModel($detail, $modelId, $provider)
                     ? new GenAiModelUnavailableException($message, $provider, $modelId)
                     : null,
                 // invalid_request / failed_precondition / parameter_unknown are
@@ -270,10 +270,10 @@ final class ProviderErrorClassifier
 
         return match (self::stringField($error, 'status')) {
             'UNAUTHENTICATED' => new GenAiAuthenticationException($message, $provider, $status),
-            'PERMISSION_DENIED' => self::namesModel($detail, $modelId)
+            'PERMISSION_DENIED' => self::namesModel($detail, $modelId, $provider)
                 ? new GenAiModelUnavailableException($message, $provider, $modelId)
                 : new GenAiAuthenticationException($message, $provider, $status),
-            'NOT_FOUND' => self::namesModel($detail, $modelId)
+            'NOT_FOUND' => self::namesModel($detail, $modelId, $provider)
                 ? new GenAiModelUnavailableException($message, $provider, $modelId)
                 : null,
             // INVALID_ARGUMENT is overwhelmingly a payload error; the one
@@ -291,18 +291,54 @@ final class ProviderErrorClassifier
      * Does this provider text point at the configured model rather than some
      * other resource? Used to keep file-not-found and generic permission
      * messages out of the model bucket.
+     *
+     * The bound provider and model id ride along on *every* call a client makes
+     * through its RetryStrategy, including the catalog calls —
+     * `AnthropicClient::listModels()` hits `GET /v1/models` and
+     * `GeminiClient::listModels()` hits `GET /v1beta/models`. So a 403 from a
+     * listing ("your API key does not have permission to list models", or a
+     * permission/method name that merely contains "ListModels") would, on a bare
+     * `models?` word match, be reported as the configured model being
+     * unavailable — for a model the request never mentioned, when the thing to
+     * fix is the credential.
+     *
+     * Only two things count as attribution:
+     *  - the configured id appears in the text as a whole token, or
+     *  - the text carries the provider's own single-model resource form:
+     *    Anthropic's observed `model: <id>` 404 body, or Google's `models/<id>`
+     *    resource name (https://ai.google.dev/api/models). A bare "model" /
+     *    "models", a method name ending in `ListModels`, or a collection path
+     *    with no id after it are not that form.
      */
-    private static function namesModel(string $detail, ?string $modelId): bool
+    private static function namesModel(string $detail, ?string $modelId, string $provider): bool
     {
         if ($detail === '') {
             return false;
         }
 
-        if ($modelId !== null && $modelId !== '' && str_contains($detail, $modelId)) {
+        if ($modelId !== null && $modelId !== '' && self::mentionsIdentifier($detail, $modelId)) {
             return true;
         }
 
-        return preg_match('/\bmodels?\b/i', $detail) === 1;
+        return match ($provider) {
+            // Observed wire text for an unknown Anthropic model id:
+            // {"type":"not_found_error","message":"model: <id>"}.
+            'anthropic' => self::matchesAny($detail, ['/\bmodel:\s*\S/i']),
+            // The `models/<id>` resource name names exactly one model; the bare
+            // collection `models` (no id) does not.
+            'gemini' => self::matchesAny($detail, ['#\bmodels/[A-Za-z0-9][A-Za-z0-9._-]*#i']),
+            default => false,
+        };
+    }
+
+    /**
+     * Whether the configured id appears as a whole token rather than as a
+     * fragment of a longer word: a short id must not be found inside an
+     * unrelated word, which a plain substring test would do.
+     */
+    private static function mentionsIdentifier(string $subject, string $needle): bool
+    {
+        return preg_match('/(?<![A-Za-z0-9])'.preg_quote($needle, '/').'(?![A-Za-z0-9])/', $subject) === 1;
     }
 
     /**
