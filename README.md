@@ -433,6 +433,68 @@ new AnthropicClient(
 );
 ```
 
+### Telling configuration failures from request failures
+
+A permanent failure is not one kind of thing. "This PDF has too many pages" is
+the request's problem — drop the job, keep serving. "The configured model id no
+longer exists" or "this API key was revoked" is the deployment's problem: every
+request will fail the same way until a human changes a setting, and someone
+should be told now.
+
+Both used to arrive as `GenAiFatalException`, which left applications matching
+provider prose (`The provided model identifier is invalid.`) by hand. Two
+subclasses now carry the second kind, and both implement the
+`GenAiConfigurationException` marker so one `catch` covers them:
+
+| Exception | Means | Carries |
+|---|---|---|
+| `GenAiModelUnavailableException` | The provider rejected the **model id**: unknown, retired, not enabled for the account, or not callable this way (a Bedrock base id that now needs an inference profile). | `$provider`, `$modelId` |
+| `GenAiAuthenticationException` | The provider rejected the **credential**: missing, malformed, revoked, expired, or not permitted. | `$provider`, `$status` |
+
+```php
+use Bherila\GenAiLaravel\Exceptions\GenAiConfigurationException;
+use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
+use Bherila\GenAiLaravel\Exceptions\GenAiModelUnavailableException;
+use Bherila\GenAiLaravel\Exceptions\GenAiRateLimitException;
+
+try {
+    $response = $client->converse($system, $messages);
+} catch (GenAiRateLimitException $e) {
+    $this->release($e->retryAfter ?? 60);          // transient — come back later
+} catch (GenAiModelUnavailableException $e) {
+    Log::critical('GenAI model is not usable', [
+        'provider' => $e->provider,                // 'anthropic' | 'bedrock' | 'gemini'
+        'model' => $e->modelId,                    // the id this deployment is configured with
+    ]);
+    $this->fail($e);
+} catch (GenAiConfigurationException $e) {         // the credential case, and anything added later
+    Log::critical('GenAI credential rejected', ['provider' => $e->provider()]);
+    $this->fail($e);
+} catch (GenAiFatalException $e) {
+    $this->fail($e);                               // this request was bad; the next one may be fine
+}
+```
+
+Both new classes extend `GenAiFatalException`, so an existing
+`catch (GenAiFatalException)` keeps catching everything it caught before — order
+the specific ones first if you want them separated.
+
+Classification lives in one place, `Http\ProviderErrorClassifier`, built from
+each provider's documented error shapes: Anthropic's error `type`, the Bedrock
+shape name in `x-amzn-errortype` / `__type` plus AWS's quoted messages, and both
+Gemini error envelopes. Every rule cites its source in the code. It is
+deliberately conservative — anything it cannot positively attribute to the model
+or the credential stays a plain `GenAiFatalException`, `429` keeps
+`GenAiRateLimitException` and `5xx` keeps `GenAiException`, and nothing is
+inferred from the status alone except `401`, which all three providers document
+as a credential failure.
+
+`$provider` and `$modelId` are populated when the exception came from a client;
+each binds its own with `RetryStrategy::forProvider()`, which *clones* the
+strategy it was handed — inject your own `RetryStrategy` subclass and the client
+keeps that instance, overrides and state included. A `RetryStrategy` used
+directly, without the binding, reports `null` and classifies nothing but `401`.
+
 ## Listing models
 
 Every client implements `listModels(): ModelInfo[]`, hitting each provider's

@@ -75,7 +75,9 @@ class GeminiClient implements GenAiClient, HeartbeatAwareClient
         $this->model = self::normaliseModelId($model);
         $this->timeout = $timeout;
         $this->responseMimeType = $responseMimeType !== '' ? $responseMimeType : null;
-        $this->retry = $retry ?? RetryStrategy::fromConfig();
+        // Bound to provider + model so a rejected model id or credential comes back
+        // as a GenAiConfigurationException instead of an unclassified fatal.
+        $this->retry = ($retry ?? RetryStrategy::fromConfig())->forProvider($this->provider(), $this->model);
         $this->conversionLimits = $conversionLimits ?? ConversionLimits::fromConfig();
     }
 

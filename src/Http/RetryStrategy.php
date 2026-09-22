@@ -17,6 +17,12 @@ use Illuminate\Support\Facades\Log;
  * appropriate `GenAi*Exception` is thrown — `GenAiRateLimitException` carries
  * the last server-suggested `retryAfter` so callers can still queue work.
  *
+ * A non-retryable response additionally goes through `ProviderErrorClassifier`,
+ * which promotes the configuration-class failures — a rejected model id, a
+ * rejected credential — to their own `GenAiFatalException` subclasses. Knowing
+ * the provider and the configured model is what makes that possible, so a client
+ * hands both over with `forProvider()`.
+ *
  * `max_attempts` counts the initial request: `max_attempts = 1` disables retry.
  */
 class RetryStrategy
@@ -25,17 +31,63 @@ class RetryStrategy
     private const RETRYABLE_STATUSES = [429, 502, 503, 504];
 
     /** Statuses that should never be retried — they will not change on retry. */
-    private const FATAL_STATUSES = [400, 401, 403, 404];
+    public const FATAL_STATUSES = [400, 401, 403, 404];
 
     /**
+     * `$provider` and `$modelId` are the only properties here that are not
+     * readonly, because `forProvider()` rebinds them on a clone — see there.
+     *
      * @param  Closure(int):void|null  $sleeper  Override `usleep()` for tests.
+     * @param  string|null  $provider  Provider slug (`anthropic`, `bedrock`, `gemini`)
+     *                                 whose error vocabulary applies to these responses.
+     * @param  string|null  $modelId  Model id the calling client is configured with.
      */
     public function __construct(
         public readonly int $maxAttempts = 3,
         public readonly int $backoffBaseMs = 1000,
         public readonly int $backoffMaxMs = 30_000,
         private readonly ?Closure $sleeper = null,
+        private ?string $provider = null,
+        private ?string $modelId = null,
     ) {}
+
+    /** Provider slug whose error vocabulary this strategy applies, if bound. */
+    public function provider(): ?string
+    {
+        return $this->provider;
+    }
+
+    /** Model id this strategy names on a configuration failure, if bound. */
+    public function modelId(): ?string
+    {
+        return $this->modelId;
+    }
+
+    /**
+     * Copy of this strategy bound to a provider and model.
+     *
+     * Retry behaviour is configuration a host owns and may inject, while the
+     * provider and model are facts the client owns, so a client binds them to
+     * whatever strategy it was handed rather than requiring the host to pass
+     * them in.
+     *
+     * The copy is a `clone`, deliberately, not a freshly constructed `self`: an
+     * application may hand a client its own subclass — a different transport,
+     * its own instrumentation, a test double — and rebuilding the base class
+     * here would discard it, leaving the override silently unused. Cloning keeps
+     * the concrete class and every property it added; only the binding differs,
+     * and the original instance stays reusable.
+     *
+     * @return static
+     */
+    public function forProvider(string $provider, ?string $modelId = null): self
+    {
+        $bound = clone $this;
+        $bound->provider = $provider;
+        $bound->modelId = $modelId;
+
+        return $bound;
+    }
 
     /**
      * Build a strategy from `config('genai.retry')`, falling back to defaults.
@@ -137,7 +189,16 @@ class RetryStrategy
             throw new GenAiRateLimitException("{$errorContext} rate limit exceeded.", $retryAfter);
         }
         if (in_array($status, self::FATAL_STATUSES, true)) {
-            throw new GenAiFatalException("{$errorContext} error: {$body}");
+            $message = "{$errorContext} error: {$body}";
+
+            throw ProviderErrorClassifier::classify(
+                status: $status,
+                body: $body,
+                message: $message,
+                provider: $this->provider,
+                modelId: $this->modelId,
+                errorTypeHeader: $response->header('x-amzn-errortype'),
+            ) ?? new GenAiFatalException($message);
         }
         throw new GenAiException("{$errorContext} error {$status}: {$body}");
     }
