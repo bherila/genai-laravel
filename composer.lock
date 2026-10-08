@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "eb0603cec936d21b5104536792abf80e",
+    "content-hash": "8a6630aba9d545c33fb81bf51f1b5a90",
     "packages": [
         {
             "name": "bherila/mcp-laravel-bridge",
