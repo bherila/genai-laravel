@@ -20,7 +20,7 @@
         }
     ],
     "require": {
-        "bherila/mcp-laravel-bridge": "^0.2.0 || ^0.3.0",
+        "bherila/mcp-laravel-bridge": "^0.2.0 || ^0.3.0 || ^0.4.0",
         "php": "^8.4",
         "illuminate/contracts": "^13",
         "illuminate/database": "^13",
