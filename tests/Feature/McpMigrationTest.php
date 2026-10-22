@@ -119,6 +119,17 @@ final class McpMigrationTest extends TestCase
                     'select EXTRA as extra from information_schema.COLUMNS where TABLE_SCHEMA = database() and TABLE_NAME = ? and COLUMN_NAME = ?',
                     [$table, $column],
                 );
+                if (! str_contains(strtolower($metadata->extra), 'on update')) {
+                    // Newer servers need not recreate the older server's implicit clause.
+                    // Model the persisted legacy definition explicitly before upgrading it.
+                    Schema::table($table, function (Blueprint $blueprint) use ($column): void {
+                        $blueprint->timestamp($column)->useCurrent()->useCurrentOnUpdate()->change();
+                    });
+                    $metadata = DB::selectOne(
+                        'select EXTRA as extra from information_schema.COLUMNS where TABLE_SCHEMA = database() and TABLE_NAME = ? and COLUMN_NAME = ?',
+                        [$table, $column],
+                    );
+                }
                 $this->assertStringContainsString('on update', strtolower($metadata->extra));
             }
         }
