@@ -54,6 +54,10 @@ final class McpMigrationTest extends TestCase
                 'collation' => 'utf8mb4_unicode_ci',
                 'prefix' => '',
             ]);
+        $app['config']->set('database.connections.mysql_probe', [
+            'driver' => 'mysql', 'host' => '127.0.0.1', 'port' => 3306,
+            'database' => 'genai_probe', 'username' => 'root', 'password' => '', 'prefix' => '',
+        ]);
         // Never connected to: the SQL Server shape is asserted from the statements
         // the migration would issue, so no server is needed to prove it.
         $app['config']->set('database.connections.sqlsrv_probe', [
@@ -66,6 +70,107 @@ final class McpMigrationTest extends TestCase
     {
         parent::setUp();
         $this->artisan('migrate:fresh')->run();
+    }
+
+    public function test_required_scheduling_instants_compile_without_timestamp_auto_update_behavior(): void
+    {
+        $previous = config('database.default');
+        config(['database.default' => 'mysql_probe']);
+        Schema::clearResolvedInstance('db.schema');
+
+        try {
+            $captured = DB::connection('mysql_probe')->pretend(static function (): void {
+                foreach (glob(dirname(__DIR__, 2).'/database/migrations/*.php') as $path) {
+                    $migration = require $path;
+                    $migration->up();
+                }
+            });
+        } finally {
+            config(['database.default' => $previous]);
+            Schema::clearResolvedInstance('db.schema');
+        }
+
+        foreach ($this->schedulingColumns() as $table => $column) {
+            $definitions = array_values(array_filter(
+                array_column($captured, 'query'),
+                static fn (string $sql): bool => str_contains($sql, '`'.$table.'`')
+                    && preg_match('/`'.preg_quote($column, '/').'` (?:timestamp|datetime)/', $sql) === 1
+                    && (str_starts_with($sql, 'create table') || str_starts_with($sql, 'alter table')),
+            ));
+            $this->assertNotEmpty($definitions);
+            $this->assertStringContainsString('`'.$column.'` datetime not null', $definitions[array_key_last($definitions)]);
+        }
+    }
+
+    public function test_forward_migration_preserves_required_scheduling_instants_during_unrelated_updates(): void
+    {
+        if (in_array(DB::connection()->getDriverName(), ['mysql', 'mariadb'], true)) {
+            // Reproduce legacy servers where the first required TIMESTAMP acquires ON UPDATE.
+            DB::statement('set session explicit_defaults_for_timestamp = 0');
+        }
+        $this->artisan('migrate:fresh', [
+            '--path' => dirname(__DIR__, 2).'/database/migrations/'.self::MIGRATION.'.php',
+            '--realpath' => true,
+        ])->assertSuccessful();
+
+        if (in_array(DB::connection()->getDriverName(), ['mysql', 'mariadb'], true)) {
+            foreach ($this->schedulingColumns() as $table => $column) {
+                $metadata = DB::selectOne(
+                    'select EXTRA as extra from information_schema.COLUMNS where TABLE_SCHEMA = database() and TABLE_NAME = ? and COLUMN_NAME = ?',
+                    [$table, $column],
+                );
+                $this->assertStringContainsString('on update', strtolower($metadata->extra));
+            }
+        }
+
+        $instant = '2001-02-03 04:05:06';
+        $mailbox = $this->insertMailbox();
+        $request = (string) Str::uuid();
+        DB::table('genai_mcp_requests')->insert([
+            'id' => $request, 'mailbox_id' => $mailbox, 'queue' => 'default',
+            'status' => 'pending', 'priority' => 0, 'payload' => '{}',
+            'available_at' => $instant, 'created_at' => $instant, 'updated_at' => $instant,
+        ]);
+        DB::table('genai_mcp_deliveries')->insert([
+            'id' => (string) Str::uuid(), 'request_id' => $request, 'type' => 'result',
+            'payload' => '{}', 'attempt_count' => 0, 'available_at' => $instant,
+            'created_at' => $instant, 'updated_at' => $instant,
+        ]);
+        DB::table('genai_mcp_claim_receipts')->insert([
+            'id' => (string) Str::uuid(), 'request_id' => $request, 'mailbox_id' => $mailbox,
+            'principal_key' => 'user:1', 'idempotency_key' => 'claim:1', 'expires_at' => $instant,
+            'created_at' => $instant, 'updated_at' => $instant,
+        ]);
+
+        $this->artisan('migrate')->assertSuccessful();
+        $this->assertTrue(DB::table('migrations')->where('migration', '2026_10_22_000000_preserve_genai_mcp_scheduling_instants')->exists());
+
+        foreach ($this->schedulingColumns() as $table => $column) {
+            $this->assertSame($instant, DB::table($table)->value($column), $table.' changed during migration.');
+            $metadata = collect(Schema::getColumns($table))->firstWhere('name', $column);
+            $this->assertSame('datetime', $metadata['type_name']);
+            $this->assertFalse($metadata['nullable']);
+        }
+
+        DB::table('genai_mcp_requests')->update(['attempt_count' => 1]);
+        DB::table('genai_mcp_deliveries')->update(['attempt_count' => 1]);
+        DB::table('genai_mcp_claim_receipts')->update(['queue_filter' => 'default']);
+
+        foreach ($this->schedulingColumns() as $table => $column) {
+            $this->assertSame($instant, DB::table($table)->value($column), $table.' changed during an unrelated update.');
+            DB::table($table)->update([$column => '2001-03-04 05:06:07']);
+            $this->assertSame('2001-03-04 05:06:07', DB::table($table)->value($column));
+        }
+    }
+
+    /** @return array<string, string> */
+    private function schedulingColumns(): array
+    {
+        return [
+            'genai_mcp_requests' => 'available_at',
+            'genai_mcp_deliveries' => 'available_at',
+            'genai_mcp_claim_receipts' => 'expires_at',
+        ];
     }
 
     public function test_migration_creates_every_table_with_identifiers_within_the_mysql_limit(): void

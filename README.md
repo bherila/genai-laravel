@@ -788,7 +788,14 @@ Host-owned attachments are untouched. Deleting a mailbox through Eloquent
 ### Install and authenticate
 
 Run the package migrations (or publish them first with
-`php artisan vendor:publish --tag=genai-mcp-migrations`), then opt in:
+`php artisan vendor:publish --tag=genai-mcp-migrations`), then opt in.
+Existing installations must also run the new migrations when upgrading. The
+scheduling-instant migration converts request/delivery `available_at` and claim
+receipt `expires_at` to required `DATETIME` columns, preserving their stored
+values. This prevents MariaDB's implicit first-`TIMESTAMP` auto-update behavior
+from rescheduling work during an unrelated update. Its rollback intentionally
+keeps the corrected column types, which remain compatible with older package
+code, rather than restoring that data-corrupting behavior.
 
 ```env
 GENAI_MCP_ENABLED=true
