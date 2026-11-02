@@ -8,16 +8,16 @@
     "packages": [
         {
             "name": "bherila/mcp-laravel-bridge",
-            "version": "v0.4.2",
+            "version": "v0.4.4",
             "source": {
                 "type": "git",
                 "url": "https://github.com/bherila/mcp-laravel-bridge.git",
-                "reference": "deff39379ad2212ca947a584ba4b832b98f4d07e"
+                "reference": "c341c5e7607d1542df8a36fe486b1e04688179ad"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/deff39379ad2212ca947a584ba4b832b98f4d07e",
-                "reference": "deff39379ad2212ca947a584ba4b832b98f4d07e",
+                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/c341c5e7607d1542df8a36fe486b1e04688179ad",
+                "reference": "c341c5e7607d1542df8a36fe486b1e04688179ad",
                 "shasum": ""
             },
             "require": {
@@ -48,9 +48,9 @@
             "description": "Shared MCP-over-REST infrastructure for Laravel applications.",
             "support": {
                 "issues": "https://github.com/bherila/mcp-laravel-bridge/issues",
-                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.4.2"
+                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.4.4"
             },
-            "time": "2026-10-10T19:28:44+00:00"
+            "time": "2026-11-02T03:37:33+00:00"
         },
         {
             "name": "brick/math",
@@ -4757,16 +4757,16 @@
         },
         {
             "name": "symfony/mime",
-            "version": "v8.1.7",
+            "version": "v8.1.10",
             "source": {
                 "type": "git",
                 "url": "https://github.com/symfony/mime.git",
-                "reference": "773ac57f20e2795bdadb65b5b1b5f4850d498283"
+                "reference": "8d1232052c9cdef170ed9608b3147bca4f61ff69"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/symfony/mime/zipball/773ac57f20e2795bdadb65b5b1b5f4850d498283",
-                "reference": "773ac57f20e2795bdadb65b5b1b5f4850d498283",
+                "url": "https://api.github.com/repos/symfony/mime/zipball/8d1232052c9cdef170ed9608b3147bca4f61ff69",
+                "reference": "8d1232052c9cdef170ed9608b3147bca4f61ff69",
                 "shasum": ""
             },
             "require": {
@@ -4819,7 +4819,7 @@
                 "mime-type"
             ],
             "support": {
-                "source": "https://github.com/symfony/mime/tree/v8.1.7"
+                "source": "https://github.com/symfony/mime/tree/v8.1.10"
             },
             "funding": [
                 {
@@ -4839,7 +4839,7 @@
                     "type": "tidelift"
                 }
             ],
-            "time": "2026-09-04T11:02:17+00:00"
+            "time": "2026-10-28T17:58:38+00:00"
         },
         {
             "name": "symfony/polyfill-ctype",
