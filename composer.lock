@@ -8,16 +8,16 @@
     "packages": [
         {
             "name": "bherila/mcp-laravel-bridge",
-            "version": "v0.4.2",
+            "version": "v0.4.4",
             "source": {
                 "type": "git",
                 "url": "https://github.com/bherila/mcp-laravel-bridge.git",
-                "reference": "deff39379ad2212ca947a584ba4b832b98f4d07e"
+                "reference": "c341c5e7607d1542df8a36fe486b1e04688179ad"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/deff39379ad2212ca947a584ba4b832b98f4d07e",
-                "reference": "deff39379ad2212ca947a584ba4b832b98f4d07e",
+                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/c341c5e7607d1542df8a36fe486b1e04688179ad",
+                "reference": "c341c5e7607d1542df8a36fe486b1e04688179ad",
                 "shasum": ""
             },
             "require": {
@@ -48,9 +48,9 @@
             "description": "Shared MCP-over-REST infrastructure for Laravel applications.",
             "support": {
                 "issues": "https://github.com/bherila/mcp-laravel-bridge/issues",
-                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.4.2"
+                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.4.4"
             },
-            "time": "2026-10-10T19:28:44+00:00"
+            "time": "2026-11-02T03:37:33+00:00"
         },
         {
             "name": "brick/math",
