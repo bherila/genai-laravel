@@ -698,6 +698,12 @@ final class McpQueueServiceTest extends TestCase
         $pending = GenAiRequest::with($client)->prompt('Return one empty record.')
             ->tools(new ToolConfig([new ToolDefinition('record', 'Record fields', Schema::object([]))], ToolChoice::any()))
             ->enqueue(new EnqueueOptions(metadata: ['callback_ref' => $private]));
+        // Prepare a persisted schema literal independently of Schema's existing
+        // enqueue serializer: the claim boundary must not reinterpret literal data.
+        $stored = McpRequest::query()->findOrFail($pending->id);
+        $payload = $stored->payload;
+        $payload['tools'][0]['input_schema']['default'] = ['type' => 'object', 'properties' => []];
+        $stored->update(['payload' => $payload]);
         $status = $this->mcpToolCall('genai_queue_status', [])->assertOk();
         $headers = [
             'Accept' => 'application/json, text/event-stream', 'Authorization' => 'Bearer test-token',
@@ -730,8 +736,12 @@ final class McpQueueServiceTest extends TestCase
         $this->assertSame($pending->id, $claim->request->id);
         $this->assertObjectNotHasProperty('metadata', $claim->request);
         $this->assertEquals(new \stdClass, $claim->request->tools[0]->input_schema->properties);
+        $this->assertSame([], $claim->request->tools[0]->input_schema->default->properties);
         $token = $claim->request->lease_token;
-        $assertOutput('renew_genai_lease', $this->mcpToolCall('renew_genai_lease', ['request_id' => $pending->id, 'lease_token' => $token]));
+        $renewed = $assertOutput('renew_genai_lease', $this->mcpToolCall('renew_genai_lease', ['request_id' => $pending->id, 'lease_token' => $token]));
+        $this->assertEquals(new \stdClass, $renewed->request->tools[0]->input_schema->properties);
+        $this->assertSame([], $renewed->request->tools[0]->input_schema->default->properties);
+        $this->assertSame([], McpRequest::query()->findOrFail($pending->id)->payload['tools'][0]['input_schema']['properties']);
         $receipt = $assertOutput('complete_genai_request', $this->mcpToolCall('complete_genai_request', [
             'request_id' => $pending->id, 'lease_token' => $token,
             'response' => ['tool_calls' => [['name' => 'record', 'input' => new \stdClass]]],
@@ -1017,7 +1027,7 @@ final class McpQueueServiceTest extends TestCase
 
         return $this->postJson('/genai/mcp', [
             'jsonrpc' => '2.0', 'id' => ++$this->mcpRequestId, 'method' => 'tools/call',
-            'params' => ['name' => $name, 'arguments' => $arguments],
+            'params' => ['name' => $name, 'arguments' => $arguments === [] ? new \stdClass : $arguments],
         ], $headers);
     }
 

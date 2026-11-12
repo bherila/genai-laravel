@@ -7,6 +7,9 @@
   0.6 corrects generated schema output. The released 0.2 line's bridge `^0.5.0`
   constraint is not widened in a patch; applications requiring bridge 0.6 must
   adopt genai-laravel 0.3 too.
+- Correct claim/renewal tool-schema empty `properties` maps to serialize as `{}`
+  after database array decoding, without changing stored payloads or idempotency
+  hashes.
 - Exercise actual mailbox MCP lifecycle outputs against their advertised
   schemas under the shared local-only validator, including empty tool input
   objects and raw-response callback/delivery metadata privacy.

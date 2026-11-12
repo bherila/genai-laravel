@@ -984,7 +984,10 @@ composer require bherila/genai-laravel:^0.3 bherila/mcp-laravel-bridge:^0.6
 ```
 
 Mailbox transport APIs, completion delivery/callback privacy, and provider
-behavior are unchanged. Actual standalone MCP lifecycle outputs are validated
+behavior are unchanged. Claim and lease-renewal envelopes now serialize an empty
+tool-schema `properties` map as `{}`, matching the existing provider wire form;
+the stored payload and idempotency hashes are unchanged. Actual standalone MCP
+lifecycle outputs are validated
 against advertised schemas through the bridge's local-only validator; private
 host delivery metadata stays out of MCP content. The supported SDK 0.9 range
 is audited in highest/lowest compatibility lanes. SDK 0.10 and bridge local
