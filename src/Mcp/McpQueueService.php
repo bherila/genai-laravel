@@ -16,6 +16,7 @@ use Bherila\GenAiLaravel\Mcp\Models\McpClaimReceipt;
 use Bherila\GenAiLaravel\Mcp\Models\McpDelivery;
 use Bherila\GenAiLaravel\Mcp\Models\McpMailbox;
 use Bherila\GenAiLaravel\Mcp\Models\McpRequest;
+use Bherila\McpLaravelBridge\Schema\SchemaTraversal;
 use Illuminate\Database\DatabaseManager;
 use Illuminate\Database\DetectsConcurrencyErrors;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -719,7 +720,12 @@ final readonly class McpQueueService
                     'requestId' => $request->id, 'attachmentId' => $attachment->id, 'attempt' => $request->attempt_count,
                 ]),
             ])->values()->all(),
-            'tools' => $request->payload['tools'], 'tool_choice' => $request->payload['tool_choice'],
+            // The database array cast loses empty schema-object kinds. Restore the
+            // schema wire form only at this boundary, preserving durable payloads.
+            'tools' => array_map(static fn (array $tool): array => array_replace($tool, [
+                'input_schema' => SchemaTraversal::normalize($tool['input_schema']),
+            ]), $request->payload['tools']),
+            'tool_choice' => $request->payload['tool_choice'],
             'submission_schema' => $this->schemas->forPayload($request->payload),
         ]];
         if (strlen(json_encode($envelope, JSON_THROW_ON_ERROR)) > (int) config('genai.mcp.limits.max_claim_json_bytes', 3145728)) {

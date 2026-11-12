@@ -28,6 +28,7 @@ use Bherila\GenAiLaravel\ToolChoice;
 use Bherila\GenAiLaravel\ToolConfig;
 use Bherila\GenAiLaravel\ToolDefinition;
 use Bherila\McpLaravelBridge\Http\McpHttpSecurityMiddleware;
+use Bherila\McpLaravelBridge\Mcp\LocalOnlySchemaValidator;
 use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
@@ -690,6 +691,74 @@ final class McpQueueServiceTest extends TestCase
         $this->assertSame($rest, $mcp);
     }
 
+    public function test_bridge_06_validates_actual_mailbox_tool_outputs_without_exposing_delivery_metadata(): void
+    {
+        $client = $this->app->make(McpClientFactory::class)->forMailbox($this->mailbox());
+        $private = 'SYNTHETIC_PRIVATE_DELIVERY_REFERENCE';
+        $pending = GenAiRequest::with($client)->prompt('Return one empty record.')
+            ->tools(new ToolConfig([new ToolDefinition('record', 'Record fields', Schema::object([]))], ToolChoice::any()))
+            ->enqueue(new EnqueueOptions(metadata: ['callback_ref' => $private]));
+        // Prepare a persisted schema literal independently of Schema's existing
+        // enqueue serializer: the claim boundary must not reinterpret literal data.
+        $stored = McpRequest::query()->findOrFail($pending->id);
+        $payload = $stored->payload;
+        $payload['tools'][0]['input_schema']['default'] = ['type' => 'object', 'properties' => []];
+        $stored->update(['payload' => $payload]);
+        $status = $this->mcpToolCall('genai_queue_status', [])->assertOk();
+        $headers = [
+            'Accept' => 'application/json, text/event-stream', 'Authorization' => 'Bearer test-token',
+            'Mcp-Session-Id' => $this->mcpSessionId, 'Mcp-Protocol-Version' => '2025-03-26',
+        ];
+        $listed = $this->postJson('/genai/mcp', [
+            'jsonrpc' => '2.0', 'id' => ++$this->mcpRequestId, 'method' => 'tools/list', 'params' => new \stdClass,
+        ], $headers)->assertOk();
+        $schemas = [];
+        foreach (json_decode((string) $listed->getContent(), flags: JSON_THROW_ON_ERROR)->result->tools as $tool) {
+            $schemas[$tool->name] = $tool->outputSchema;
+        }
+        $this->assertEqualsCanonicalizing(['genai_queue_status', 'claim_genai_request', 'renew_genai_lease', 'complete_genai_request', 'fail_genai_request'], array_keys($schemas));
+        $validator = new LocalOnlySchemaValidator;
+        $assertOutput = function (string $tool, TestResponse $response) use ($schemas, $validator, $private): object {
+            $response->assertOk();
+            $wire = json_decode((string) $response->getContent(), flags: JSON_THROW_ON_ERROR);
+            $this->assertFalse($wire->result->isError ?? false);
+            $data = $wire->result->structuredContent;
+            $this->assertIsObject($data);
+            $this->assertSame([], $validator->validateAgainstJsonSchema($data, $schemas[$tool]));
+            // Raw bytes, independently of any schema parser's handling of additional fields.
+            $this->assertStringNotContainsString($private, (string) $response->getContent());
+            $this->assertStringNotContainsString('"callback_ref"', (string) $response->getContent());
+
+            return $data;
+        };
+        $assertOutput('genai_queue_status', $status);
+        $claim = $assertOutput('claim_genai_request', $this->mcpToolCall('claim_genai_request', []));
+        $this->assertSame($pending->id, $claim->request->id);
+        $this->assertObjectNotHasProperty('metadata', $claim->request);
+        $this->assertEquals(new \stdClass, $claim->request->tools[0]->input_schema->properties);
+        $this->assertSame([], $claim->request->tools[0]->input_schema->default->properties);
+        $token = $claim->request->lease_token;
+        $renewed = $assertOutput('renew_genai_lease', $this->mcpToolCall('renew_genai_lease', ['request_id' => $pending->id, 'lease_token' => $token]));
+        $this->assertEquals(new \stdClass, $renewed->request->tools[0]->input_schema->properties);
+        $this->assertSame([], $renewed->request->tools[0]->input_schema->default->properties);
+        $this->assertSame([], McpRequest::query()->findOrFail($pending->id)->payload['tools'][0]['input_schema']['properties']);
+        $receipt = $assertOutput('complete_genai_request', $this->mcpToolCall('complete_genai_request', [
+            'request_id' => $pending->id, 'lease_token' => $token,
+            'response' => ['tool_calls' => [['name' => 'record', 'input' => new \stdClass]]],
+        ]));
+        $this->assertEquals(new \stdClass, $receipt->result->tool_calls[0]->input);
+        $this->assertSame($private, McpRequest::query()->findOrFail($pending->id)->metadata['callback_ref']);
+        $empty = $assertOutput('claim_genai_request', $this->mcpToolCall('claim_genai_request', []));
+        $this->assertTrue($empty->empty);
+        GenAiRequest::with($client)->prompt('Synthetic second request.')->enqueue(new EnqueueOptions(metadata: ['callback_ref' => $private]));
+        $claim = $assertOutput('claim_genai_request', $this->mcpToolCall('claim_genai_request', []));
+        $failed = $assertOutput('fail_genai_request', $this->mcpToolCall('fail_genai_request', [
+            'request_id' => $claim->request->id, 'lease_token' => $claim->request->lease_token,
+            'error_code' => 'synthetic_failure', 'error_message' => 'Synthetic processing failure.', 'retryable' => false,
+        ]));
+        $this->assertSame('failed', $failed->status);
+    }
+
     public function test_standalone_edge_rejects_invalid_host_origin_and_query_credentials(): void
     {
         $middleware = $this->app->make(McpHttpSecurityMiddleware::class);
@@ -958,7 +1027,7 @@ final class McpQueueServiceTest extends TestCase
 
         return $this->postJson('/genai/mcp', [
             'jsonrpc' => '2.0', 'id' => ++$this->mcpRequestId, 'method' => 'tools/call',
-            'params' => ['name' => $name, 'arguments' => $arguments],
+            'params' => ['name' => $name, 'arguments' => $arguments === [] ? new \stdClass : $arguments],
         ], $headers);
     }
 

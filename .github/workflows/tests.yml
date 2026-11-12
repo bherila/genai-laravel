@@ -28,6 +28,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
@@ -46,6 +48,9 @@ jobs:
           else
             composer update --prefer-stable --prefer-dist --no-interaction
           fi
+
+      - name: Audit installed compatibility dependencies
+        run: composer audit
 
       - name: Run tests
         run: vendor/bin/phpunit --configuration phpunit.xml
@@ -82,6 +87,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
@@ -94,6 +101,9 @@ jobs:
         run: |
           composer require "laravel/framework:13.*" "orchestra/testbench:^11" --no-interaction --no-update
           composer update --prefer-stable --prefer-dist --no-interaction
+
+      - name: Audit installed MariaDB dependencies
+        run: composer audit
 
       - name: Run migration tests against MariaDB
         env:
@@ -111,6 +121,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
