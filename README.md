@@ -8,6 +8,7 @@ subscription client through MCP/REST.
 
 - PHP 8.4+
 - Laravel 13
+- MCP PHP SDK 0.9 and MCP Laravel Bridge 0.5 (runtime dependencies)
 
 Laravel 13 ships a first-party AI SDK (`laravel/ai`) covering text generation
 across the same providers. This package stays focused on what that abstraction

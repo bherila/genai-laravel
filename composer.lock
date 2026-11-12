@@ -4,20 +4,20 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "00841dbc6f14696beff61bb1ab4cdc0e",
+    "content-hash": "e5d2dcb9ff2a2b209bc010975e6a20d6",
     "packages": [
         {
             "name": "bherila/mcp-laravel-bridge",
-            "version": "v0.4.4",
+            "version": "v0.5.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/bherila/mcp-laravel-bridge.git",
-                "reference": "c341c5e7607d1542df8a36fe486b1e04688179ad"
+                "reference": "59ae75b86b20788006e557c0cf555ec146da32cd"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/c341c5e7607d1542df8a36fe486b1e04688179ad",
-                "reference": "c341c5e7607d1542df8a36fe486b1e04688179ad",
+                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/59ae75b86b20788006e557c0cf555ec146da32cd",
+                "reference": "59ae75b86b20788006e557c0cf555ec146da32cd",
                 "shasum": ""
             },
             "require": {
@@ -26,7 +26,7 @@
                 "illuminate/http": "^12.0 || ^13.0",
                 "illuminate/routing": "^12.0 || ^13.0",
                 "illuminate/support": "^12.0 || ^13.0",
-                "mcp/sdk": "^0.7.1 || ^0.8.0",
+                "mcp/sdk": "^0.7.1 || ^0.8.0 || ^0.9.0",
                 "php": ">=8.3 <8.6",
                 "psr/log": "^3.0",
                 "symfony/psr-http-message-bridge": "^7.2 || ^8.0"
@@ -48,9 +48,9 @@
             "description": "Shared MCP-over-REST infrastructure for Laravel applications.",
             "support": {
                 "issues": "https://github.com/bherila/mcp-laravel-bridge/issues",
-                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.4.4"
+                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.5.0"
             },
-            "time": "2026-11-02T03:37:33+00:00"
+            "time": "2026-11-03T07:34:53+00:00"
         },
         {
             "name": "brick/math",
@@ -2066,16 +2066,16 @@
         },
         {
             "name": "mcp/sdk",
-            "version": "v0.8.1",
+            "version": "v0.9.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/modelcontextprotocol/php-sdk.git",
-                "reference": "c5dbfb64e5a2a30872ec3927b4cf13a2eb05e10e"
+                "reference": "be71c78bc3bce25f50d6a7e592017b8af6a2120f"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/modelcontextprotocol/php-sdk/zipball/c5dbfb64e5a2a30872ec3927b4cf13a2eb05e10e",
-                "reference": "c5dbfb64e5a2a30872ec3927b4cf13a2eb05e10e",
+                "url": "https://api.github.com/repos/modelcontextprotocol/php-sdk/zipball/be71c78bc3bce25f50d6a7e592017b8af6a2120f",
+                "reference": "be71c78bc3bce25f50d6a7e592017b8af6a2120f",
                 "shasum": ""
             },
             "require": {
@@ -2096,6 +2096,9 @@
                 "symfony/deprecation-contracts": "^2.5 || ^3.0",
                 "symfony/uid": "^5.4 || ^6.4 || ^7.3 || ^8.0"
             },
+            "conflict": {
+                "phpstan/phpstan": "2.3.0"
+            },
             "require-dev": {
                 "composer/semver": "^3.0",
                 "ext-openssl": "*",
@@ -2108,15 +2111,20 @@
                 "phpdocumentor/shim": "^3",
                 "phpstan/phpstan": "^2.1",
                 "phpunit/phpunit": "^10.5",
+                "psr/cache": "^1.0 || ^2.0 || ^3.0",
                 "psr/simple-cache": "^2.0 || ^3.0",
                 "symfony/cache": "^5.4 || ^6.4 || ^7.3 || ^8.0",
                 "symfony/console": "^5.4 || ^6.4 || ^7.3 || ^8.0",
                 "symfony/finder": "^5.4 || ^6.4 || ^7.3 || ^8.0",
                 "symfony/http-client": "^5.4 || ^6.4 || ^7.3 || ^8.0",
+                "symfony/lock": "^5.4 || ^6.4 || ^7.3 || ^8.0",
                 "symfony/process": "^5.4 || ^6.4 || ^7.3 || ^8.0"
             },
             "suggest": {
-                "symfony/finder": "Required for file-based discovery."
+                "firebase/php-jwt": "Required for the JwtTokenValidator.",
+                "psr/cache-implementation": "Required for JwtTokenValidator::fromIssuer() to cache metadata and keys.",
+                "symfony/finder": "Required for file-based discovery.",
+                "symfony/lock": "Required for the SymfonyLockSessionLock."
             },
             "type": "library",
             "autoload": {
@@ -2145,9 +2153,9 @@
             "description": "Model Context Protocol SDK for Client and Server applications in PHP",
             "support": {
                 "issues": "https://github.com/modelcontextprotocol/php-sdk/issues",
-                "source": "https://github.com/modelcontextprotocol/php-sdk/tree/v0.8.1"
+                "source": "https://github.com/modelcontextprotocol/php-sdk/tree/v0.9.0"
             },
-            "time": "2026-08-29T23:10:56+00:00"
+            "time": "2026-10-18T14:29:29+00:00"
         },
         {
             "name": "monolog/monolog",
