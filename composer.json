@@ -20,7 +20,7 @@
         }
     ],
     "require": {
-        "bherila/mcp-laravel-bridge": "^0.2.0 || ^0.3.0 || ^0.4.0",
+        "bherila/mcp-laravel-bridge": "^0.5.0",
         "php": "^8.4",
         "illuminate/contracts": "^13",
         "illuminate/database": "^13",
@@ -28,7 +28,8 @@
         "illuminate/support": "^13",
         "illuminate/http": "^13",
         "illuminate/routing": "^13",
-        "opis/json-schema": "^2.6"
+        "opis/json-schema": "^2.6",
+        "mcp/sdk": "^0.9.0"
     },
     "require-dev": {
         "dompdf/dompdf": "^3",
