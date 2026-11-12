@@ -8,7 +8,7 @@ subscription client through MCP/REST.
 
 - PHP 8.4+
 - Laravel 13
-- MCP PHP SDK 0.9 and MCP Laravel Bridge 0.5 (runtime dependencies)
+- MCP PHP SDK 0.9 and MCP Laravel Bridge 0.6 (runtime dependencies; genai-laravel 0.3+)
 
 Laravel 13 ships a first-party AI SDK (`laravel/ai`) covering text generation
 across the same providers. This package stays focused on what that abstraction
@@ -965,6 +965,36 @@ repository because no user account credentials are available to its test suite.
 | Office-format documents | auto-convert 📄📊 | ✅ native | auto-convert 📄📊 |
 | Auto DOC/DOCX → PDF (with phpword + dompdf) | ✅ | n/a | ✅ |
 | Auto XLSX/XLS/ODS/CSV → text (with phpspreadsheet) | ✅ | n/a | ✅ |
+
+## Adopting 0.3: bridge schema correctness
+
+The 0.3 line explicitly requires `bherila/mcp-laravel-bridge:^0.6.0`, retaining
+MCP SDK `^0.9.0`. Bridge 0.6 fixes schema-bearing traversal, literal JSON data
+preservation and empty-schema serialization. Because generated documents can
+change, this is an opt-in genai-laravel minor: 0.2.7 requires bridge `^0.5.0`
+and cannot coexist with a root requirement for bridge `^0.6.0`. Widening that
+constraint in an existing 0.2 patch would silently move consumers across the
+bridge's output-correctness boundary, so 0.3 adopts 0.6 explicitly rather than
+accepting both lines.
+
+Consumers adopting bridge 0.6 should opt into both minors together:
+
+```bash
+composer require bherila/genai-laravel:^0.3 bherila/mcp-laravel-bridge:^0.6
+```
+
+Mailbox transport APIs, completion delivery/callback privacy, and provider
+behavior are unchanged. Actual standalone MCP lifecycle outputs are validated
+against advertised schemas through the bridge's local-only validator; private
+host delivery metadata stays out of MCP content. The supported SDK 0.9 range
+is audited in highest/lowest compatibility lanes. SDK 0.10 and bridge local
+fragment relocation remain separate migrations. Bridge's numeric-name and
+inline-anchor limitations are tracked in [bridge #37](https://github.com/bherila/mcp-laravel-bridge/issues/37);
+review generated-document snapshots if the host uses those shapes.
+
+Use CI for the full SQLite tests, MariaDB migration matrix, PHPStan, Pint and
+audits. Local validation should stay focused; synthetic transport checks need
+dependencies matching the candidate lockfile, not an older vendor directory.
 
 ## Upgrading from 0.2.x
 

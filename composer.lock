@@ -4,20 +4,20 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "e5d2dcb9ff2a2b209bc010975e6a20d6",
+    "content-hash": "68d333163d19012767bef60c0c127568",
     "packages": [
         {
             "name": "bherila/mcp-laravel-bridge",
-            "version": "v0.5.0",
+            "version": "v0.6.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/bherila/mcp-laravel-bridge.git",
-                "reference": "59ae75b86b20788006e557c0cf555ec146da32cd"
+                "reference": "42d1c88dcb9b7022aab7e8284caaa718aecf76b8"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/59ae75b86b20788006e557c0cf555ec146da32cd",
-                "reference": "59ae75b86b20788006e557c0cf555ec146da32cd",
+                "url": "https://api.github.com/repos/bherila/mcp-laravel-bridge/zipball/42d1c88dcb9b7022aab7e8284caaa718aecf76b8",
+                "reference": "42d1c88dcb9b7022aab7e8284caaa718aecf76b8",
                 "shasum": ""
             },
             "require": {
@@ -26,7 +26,7 @@
                 "illuminate/http": "^12.0 || ^13.0",
                 "illuminate/routing": "^12.0 || ^13.0",
                 "illuminate/support": "^12.0 || ^13.0",
-                "mcp/sdk": "^0.7.1 || ^0.8.0 || ^0.9.0",
+                "mcp/sdk": "^0.7.1 || ^0.9.0",
                 "php": ">=8.3 <8.6",
                 "psr/log": "^3.0",
                 "symfony/psr-http-message-bridge": "^7.2 || ^8.0"
@@ -48,9 +48,9 @@
             "description": "Shared MCP-over-REST infrastructure for Laravel applications.",
             "support": {
                 "issues": "https://github.com/bherila/mcp-laravel-bridge/issues",
-                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.5.0"
+                "source": "https://github.com/bherila/mcp-laravel-bridge/tree/v0.6.0"
             },
-            "time": "2026-11-03T07:34:53+00:00"
+            "time": "2026-11-12T20:07:29+00:00"
         },
         {
             "name": "brick/math",
