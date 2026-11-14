@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 — Unreleased
+
+- The MCP server's initialize instructions describe the mailbox tools instead of
+  telling the client to claim requests until the queue is empty. A client reads
+  them in every session whatever its user asked, and one that screens server
+  instructions discarded the work loop as standing orders. The drain workflow
+  stays in the README's starter prompt, for the user to give. No tool, schema or
+  mailbox behavior changes.
+
 ## 0.3.0 — Unreleased
 
 - Explicitly adopt signed MCP Laravel Bridge 0.6 (`^0.6.0`) while retaining
