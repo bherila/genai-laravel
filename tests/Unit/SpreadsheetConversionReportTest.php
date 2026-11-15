@@ -2,10 +2,12 @@
 
 namespace Bherila\GenAiLaravel\Tests\Unit;
 
+use Bherila\GenAiLaravel\FileConversion\BoundedReadFilter;
 use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetConversion;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetTruncation;
+use Bherila\GenAiLaravel\FileConversion\UnreadSpreadsheetValues;
 use Orchestra\Testbench\TestCase;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
@@ -156,6 +158,64 @@ final class SpreadsheetConversionReportTest extends TestCase
 
         $this->assertNull($conversion->truncation);
         $this->assertStringContainsString('Client', $conversion->text);
+    }
+
+    /**
+     * The ODS reader reads a formula, and may read a typed value, from a
+     * cell's attributes alone, so a self-closing cell past the ceiling is a
+     * value lost at load just as one with a paragraph is.
+     */
+    public function test_a_self_closing_ods_formula_or_typed_cell_past_the_ceiling_is_a_lost_value(): void
+    {
+        foreach ([
+            '<table:table-cell table:formula="of:=123456789"/>',
+            '<table:table-cell office:value-type="float" office:value="123456789"/>',
+        ] as $cell) {
+            $workbook = $this->odsWithRows(
+                '<table:table-row><table:table-cell office:value-type="string"><text:p>Client</text:p></table:table-cell></table:table-row>'
+                .'<table:table-row table:number-rows-repeated="500"><table:table-cell/></table:table-row>'
+                .'<table:table-row>'.$cell.'</table:table-row>',
+            );
+
+            $this->assertSame(
+                SpreadsheetTruncation::RowLimit,
+                SpreadsheetToText::convertWithReport($workbook, self::ODS_MIME, $this->limits())->truncation,
+                $cell,
+            );
+        }
+    }
+
+    /**
+     * The second reading runs on the conversion's clock. Once the deadline
+     * has passed it stops and reports the time limit rather than running on,
+     * or answering as though it had read the whole file.
+     */
+    public function test_the_second_reading_stops_at_the_conversion_deadline(): void
+    {
+        $formattedPastTheCeiling = function (Spreadsheet $spreadsheet): void {
+            $spreadsheet->getActiveSheet()->setCellValue('A1', 'Client');
+            $spreadsheet->getActiveSheet()->getStyle('A20:C500')->getFont()->setBold(true);
+        };
+
+        foreach (['Xlsx', 'Ods'] as $format) {
+            $path = tempnam(sys_get_temp_dir(), 'test_deadline_');
+            file_put_contents($path, base64_decode($this->workbook($format, $formattedPastTheCeiling)));
+            $reader = IOFactory::createReader($format);
+            $filter = BoundedReadFilter::for($this->limits());
+
+            try {
+                // With time left the reading finds nothing lost; with none it
+                // reports the time limit instead of the same answer.
+                $this->assertNull(UnreadSpreadsheetValues::find($path, $format, $reader, $filter, 1, microtime(true) + 60), $format);
+                $this->assertSame(
+                    SpreadsheetTruncation::TimeLimit,
+                    UnreadSpreadsheetValues::find($path, $format, $reader, $filter, 1, microtime(true) - 1),
+                    $format,
+                );
+            } finally {
+                @unlink($path);
+            }
+        }
     }
 
     /** A cut the renderer reaches is reported the same way, with its own reason. */

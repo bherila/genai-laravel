@@ -74,7 +74,8 @@ final class SpreadsheetToText
      * while the value is lost. When the read filter refused anything, the
      * file is read a second time for values alone
      * ({@see UnreadSpreadsheetValues}), and a value found there, or any doubt,
-     * is reported as the row limit.
+     * is reported as the row limit. That reading runs on the conversion's
+     * clock, and is reported as the time limit if the clock runs out first.
      */
     public static function convertWithReport(string $base64, string $mimeType, ?ConversionLimits $limits = null): SpreadsheetConversion
     {
@@ -175,11 +176,9 @@ final class SpreadsheetToText
             unset($spreadsheet);
 
             if ($truncation === null && $filter->refusedAny()) {
-                $truncation = match (true) {
-                    microtime(true) > $deadline => SpreadsheetTruncation::TimeLimit,
-                    UnreadSpreadsheetValues::present($tmp, $format, $reader, $filter, $sheetCount) => SpreadsheetTruncation::RowLimit,
-                    default => null,
-                };
+                $truncation = microtime(true) > $deadline
+                    ? SpreadsheetTruncation::TimeLimit
+                    : UnreadSpreadsheetValues::find($tmp, $format, $reader, $filter, $sheetCount, $deadline);
             }
 
             if ($truncation !== null) {

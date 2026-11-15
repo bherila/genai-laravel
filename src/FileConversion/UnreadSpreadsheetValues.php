@@ -9,7 +9,7 @@ use PhpOffice\PhpSpreadsheet\Reader\Xlsx\Namespaces;
 
 /**
  * Whether a workbook holds a value that {@see BoundedReadFilter} kept out of
- * the load.
+ * the load, reported as the ceiling the extract stopped at.
  *
  * Asked only after the filter refused something, since readers consult it for
  * blank cells and row and column attributes as well as for values: a sheet
@@ -27,24 +27,58 @@ use PhpOffice\PhpSpreadsheet\Reader\Xlsx\Namespaces;
  */
 final class UnreadSpreadsheetValues
 {
+    /** How many nodes or rows a walk takes between looks at the clock. */
+    private const CLOCK_INTERVAL = 1_024;
+
+    private int $steps = 0;
+
+    private function __construct(
+        private readonly BoundedReadFilter $filter,
+        private readonly float $deadline,
+    ) {}
+
     /**
+     * `RowLimit` when a value past the filter's reach is found or cannot be
+     * ruled out, `TimeLimit` when the conversion's deadline passes first, and
+     * null when the second reading finds nothing lost.
+     *
      * @param  string  $format  The reader type the workbook was loaded with ({@see IOFactory::identify()}).
      * @param  int  $loadedSheets  How many worksheets the load produced.
+     * @param  float  $deadline  microtime(true) value the conversion must finish by.
      */
-    public static function present(string $path, string $format, IReader $reader, BoundedReadFilter $filter, int $loadedSheets): bool
+    public static function find(string $path, string $format, IReader $reader, BoundedReadFilter $filter, int $loadedSheets, float $deadline): ?SpreadsheetTruncation
     {
+        $walk = new self($filter, $deadline);
+
         try {
-            return match ($format) {
-                IOFactory::READER_XLSX => self::inXlsx($path, $reader, $filter, $loadedSheets),
-                IOFactory::READER_ODS => self::inOds($path, $filter),
+            $lost = match ($format) {
+                IOFactory::READER_XLSX => $walk->inXlsx($path, $reader, $loadedSheets),
+                IOFactory::READER_ODS => $walk->inOds($path),
                 // The CSV reader asks only about a non-empty field, so its
                 // refusal is a value. The rest — legacy .xls among them — also
                 // ask about blank and formatting-only cells, and nothing here
                 // reads them a second time.
                 default => true,
             };
+        } catch (DeadlinePassed) {
+            return SpreadsheetTruncation::TimeLimit;
         } catch (\Throwable) {
-            return true;
+            $lost = true;
+        }
+
+        return $lost ? SpreadsheetTruncation::RowLimit : null;
+    }
+
+    /**
+     * Stops the walk once the conversion's own deadline passes, so a second
+     * reading can never run a conversion past `maxSeconds`.
+     *
+     * @throws DeadlinePassed
+     */
+    private function tick(): void
+    {
+        if ($this->steps++ % self::CLOCK_INTERVAL === 0 && microtime(true) > $this->deadline) {
+            throw new DeadlinePassed;
         }
     }
 
@@ -53,7 +87,7 @@ final class UnreadSpreadsheetValues
      * with a value past the filter's reach. Finding fewer worksheets than the
      * load produced means a sheet went unread here, and that counts as a value.
      */
-    private static function inXlsx(string $path, IReader $reader, BoundedReadFilter $filter, int $loadedSheets): bool
+    private function inXlsx(string $path, IReader $reader, int $loadedSheets): bool
     {
         $zip = new \ZipArchive;
         if ($zip->open($path, \ZipArchive::RDONLY) !== true) {
@@ -64,6 +98,7 @@ final class UnreadSpreadsheetValues
             $scanner = XmlScanner::getInstance($reader);
             $worksheets = 0;
             for ($index = 0; $index < $zip->numFiles; $index++) {
+                $this->tick();
                 $contents = $zip->getFromIndex($index);
                 if (! is_string($contents) || $contents === '') {
                     continue;
@@ -73,7 +108,7 @@ final class UnreadSpreadsheetValues
                     continue;
                 }
                 $worksheets++;
-                if (self::xlsxWorksheetHasValuePast($worksheet, $filter)) {
+                if ($this->xlsxWorksheetHasValuePast($worksheet)) {
                     return true;
                 }
             }
@@ -112,10 +147,11 @@ final class UnreadSpreadsheetValues
      * position is taken as the reader takes it: its own reference, or its
      * place in the row and the row's place in the sheet when it has none.
      */
-    private static function xlsxWorksheetHasValuePast(\SimpleXMLElement $worksheet, BoundedReadFilter $filter): bool
+    private function xlsxWorksheetHasValuePast(\SimpleXMLElement $worksheet): bool
     {
         $rowNumber = 1;
         foreach ($worksheet->sheetData->row as $row) {
+            $this->tick();
             $columnNumber = 1;
             foreach ($row->c as $cell) {
                 $reference = (string) $cell->attributes()['r'];
@@ -127,7 +163,7 @@ final class UnreadSpreadsheetValues
                     $cellRow = $rowNumber;
                 }
                 if ((isset($cell->v) || isset($cell->is) || isset($cell->f))
-                    && ($cellRow > $filter->maxRow() || $column > $filter->maxColumns())) {
+                    && ($cellRow > $this->filter->maxRow() || $column > $this->filter->maxColumns())) {
                     return true;
                 }
                 $columnNumber++;
@@ -146,11 +182,13 @@ final class UnreadSpreadsheetValues
      *
      * Counted the way the reader counts: a row or cell repeated N times
      * advances N, so a cell with content in a repeated span reaches the
-     * span's end. Only a cell with content counts, so the empty span a sheet
-     * is padded out with does not. A table inside a cell would restart the
+     * span's end. A cell counts when it has content or carries a formula or a
+     * value type, which the reader can read from its attributes alone, so a
+     * self-closing `<table:table-cell table:formula="…"/>` is a value; the
+     * empty span a sheet is padded out with is not. A table inside a cell would restart the
      * count, so one is taken as a value rather than walked.
      */
-    private static function inOds(string $path, BoundedReadFilter $filter): bool
+    private function inOds(string $path): bool
     {
         $xml = \XMLReader::open('zip://'.$path.'#content.xml', null, LIBXML_NONET | LIBXML_COMPACT);
         if (! $xml instanceof \XMLReader) {
@@ -162,6 +200,7 @@ final class UnreadSpreadsheetValues
             $column = 0;
             $sheetDepth = null;
             while ($xml->read()) {
+                $this->tick();
                 if ($xml->nodeType !== \XMLReader::ELEMENT) {
                     continue;
                 }
@@ -180,7 +219,7 @@ final class UnreadSpreadsheetValues
                     case 'table:table-cell':
                     case 'table:covered-table-cell':
                         $column += max(1, (int) $xml->getAttribute('table:number-columns-repeated'));
-                        if (! $xml->isEmptyElement && ($row > $filter->maxRow() || $column > $filter->maxColumns())) {
+                        if (($row > $this->filter->maxRow() || $column > $this->filter->maxColumns()) && self::odsCellHoldsValue($xml)) {
                             return true;
                         }
                         break;
@@ -191,6 +230,17 @@ final class UnreadSpreadsheetValues
         } finally {
             $xml->close();
         }
+    }
+
+    /**
+     * Whether the cell the reader is on has anything the ODS reader could
+     * turn into a value: child content, a formula or a value type.
+     */
+    private static function odsCellHoldsValue(\XMLReader $xml): bool
+    {
+        return ! $xml->isEmptyElement
+            || $xml->getAttribute('table:formula') !== null
+            || $xml->getAttribute('office:value-type') !== null;
     }
 
     /** A column's letters (A, Z, AA, XFD) as its 1-based number. */
