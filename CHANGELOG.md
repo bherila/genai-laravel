@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2 — 2026-11-15
+
+- Add `SpreadsheetToText::convertWithReport()` and its `SpreadsheetConversion`
+  result so callers can check `isComplete()` instead of parsing the text marker.
+  The report includes row, cell, output and time truncation, including values a
+  bounded reader dropped while loading sparse XLSX, XLS or ODS workbooks. The
+  existing `convert()` text/marker API remains compatible.
+- Keep the XLSX completeness check's second read to the archive parts the initial
+  load actually inflated, retaining the conversion deadline and archive bounds.
+  Uncertain or partial extraction stays incomplete rather than being claimed as
+  a whole-workbook result.
+- Consumers requiring complete extraction, including PII scans, should hold an
+  incomplete report. The 0.3 line continues to require MCP Laravel Bridge ^0.6
+  and SDK ^0.9; consumers on 0.2 must explicitly adopt that compatibility change.
+
 ## 0.3.1 — Unreleased
 
 - The MCP server's initialize instructions describe the mailbox tools instead of
