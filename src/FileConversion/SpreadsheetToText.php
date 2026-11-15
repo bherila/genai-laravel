@@ -136,7 +136,9 @@ final class SpreadsheetToText
 
             try {
                 $format = IOFactory::identify($tmp);
-                $reader = IOFactory::createReader($format);
+                // The Excel reader is the one that remembers which parts it
+                // opened, so a second reading can keep to those parts.
+                $reader = $format === IOFactory::READER_XLSX ? new XlsxPartRecorder : IOFactory::createReader($format);
                 // Number formats are what make a spreadsheet readable: they turn a
                 // serial into a date, a fraction into a percentage and a bare number
                 // into a currency amount. They live in the workbook's style records,

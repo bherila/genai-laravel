@@ -86,12 +86,20 @@ final class UnreadSpreadsheetValues
     }
 
     /**
-     * Every part of the package that parses as a worksheet is read for a cell
-     * with a value past the filter's reach. Finding fewer worksheets than the
-     * load produced means a sheet went unread here, and that counts as a value.
+     * Every part the load inflated that parses as a worksheet is read for a
+     * cell with a value past the filter's reach. Only those parts: the reader
+     * records them as it opens them ({@see XlsxPartRecorder}), so an entry the
+     * workbook never points at is skipped here without being inflated, and
+     * the reading costs no more memory than the load did. Finding fewer
+     * worksheets than the load produced means a sheet went unread here, and
+     * that counts as a value, as does a reader that kept no record.
      */
     private function inXlsx(string $path, IReader $reader, int $loadedSheets): bool
     {
+        if (! $reader instanceof XlsxPartRecorder) {
+            return true;
+        }
+
         $zip = new \ZipArchive;
         if ($zip->open($path, \ZipArchive::RDONLY) !== true) {
             return true;
@@ -102,6 +110,10 @@ final class UnreadSpreadsheetValues
             $worksheets = 0;
             for ($index = 0; $index < $zip->numFiles; $index++) {
                 $this->tick();
+                $stat = $zip->statIndex($index);
+                if ($stat === false || ! $reader->read($stat)) {
+                    continue;
+                }
                 $contents = $zip->getFromIndex($index);
                 if (! is_string($contents) || $contents === '') {
                     continue;
