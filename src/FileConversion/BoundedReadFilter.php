@@ -16,13 +16,22 @@ use PhpOffice\PhpSpreadsheet\Reader\IReadFilter;
  * read. It is deliberately generous by a row: the renderer still applies the
  * exact limits and appends the truncation marker, and this only has to stop
  * the workbook from being materialised in full.
+ *
+ * It also remembers whether it refused anything, because a refused cell never
+ * reaches the renderer: a sparse sheet — an empty span of rows, then one value
+ * past the ceiling — loads as a few rows and renders without reaching any
+ * limit. A refusal is not proof of a lost value, since readers also consult
+ * the filter for blank, formatting-only cells and for row and column
+ * attributes, so {@see SpreadsheetToText} treats it as the cue to look.
  */
-final readonly class BoundedReadFilter implements IReadFilter
+final class BoundedReadFilter implements IReadFilter
 {
-    private int $maxColumnIndex;
+    private readonly int $maxColumnIndex;
+
+    private bool $refused = false;
 
     public function __construct(
-        private int $maxRow,
+        private readonly int $maxRow,
         int $maxColumns = 16_384,
     ) {
         $this->maxColumnIndex = max(1, $maxColumns);
@@ -38,11 +47,31 @@ final readonly class BoundedReadFilter implements IReadFilter
 
     public function readCell($columnAddress, $row, $worksheetName = ''): bool
     {
-        if ($row > $this->maxRow) {
-            return false;
+        if ($row <= $this->maxRow && self::columnIndex($columnAddress) <= $this->maxColumnIndex) {
+            return true;
         }
 
-        return self::columnIndex($columnAddress) <= $this->maxColumnIndex;
+        $this->refused = true;
+
+        return false;
+    }
+
+    /** Whether any cell, row or column the reader asked about was refused. */
+    public function refusedAny(): bool
+    {
+        return $this->refused;
+    }
+
+    /** The last row this filter lets the reader load. */
+    public function maxRow(): int
+    {
+        return $this->maxRow;
+    }
+
+    /** The last column, as a 1-based index, this filter lets the reader load. */
+    public function maxColumns(): int
+    {
+        return $this->maxColumnIndex;
     }
 
     /**

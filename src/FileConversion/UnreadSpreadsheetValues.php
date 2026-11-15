@@ -1,0 +1,206 @@
+<?php
+
+namespace Bherila\GenAiLaravel\FileConversion;
+
+use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\Reader\IReader;
+use PhpOffice\PhpSpreadsheet\Reader\Security\XmlScanner;
+use PhpOffice\PhpSpreadsheet\Reader\Xlsx\Namespaces;
+
+/**
+ * Whether a workbook holds a value that {@see BoundedReadFilter} kept out of
+ * the load.
+ *
+ * Asked only after the filter refused something, since readers consult it for
+ * blank cells and row and column attributes as well as for values: a sheet
+ * whose formatting runs to row 1,048,576 is refused there without losing a
+ * thing. Each answer here is a second, value-only reading of the file in the
+ * format the reader loaded it as, kept to what can be done without building
+ * the cells: OpenDocument is streamed one node at a time, and an Excel
+ * workbook's parts are parsed the way the reader parses a worksheet.
+ *
+ * Every doubt resolves to "yes": a format with no reading here, a part that
+ * cannot be accounted for, or a reading that fails all report a lost value,
+ * so the extract is marked partial rather than passed off as whole.
+ *
+ * @internal
+ */
+final class UnreadSpreadsheetValues
+{
+    /**
+     * @param  string  $format  The reader type the workbook was loaded with ({@see IOFactory::identify()}).
+     * @param  int  $loadedSheets  How many worksheets the load produced.
+     */
+    public static function present(string $path, string $format, IReader $reader, BoundedReadFilter $filter, int $loadedSheets): bool
+    {
+        try {
+            return match ($format) {
+                IOFactory::READER_XLSX => self::inXlsx($path, $reader, $filter, $loadedSheets),
+                IOFactory::READER_ODS => self::inOds($path, $filter),
+                // The CSV reader asks only about a non-empty field, so its
+                // refusal is a value. The rest — legacy .xls among them — also
+                // ask about blank and formatting-only cells, and nothing here
+                // reads them a second time.
+                default => true,
+            };
+        } catch (\Throwable) {
+            return true;
+        }
+    }
+
+    /**
+     * Every part of the package that parses as a worksheet is read for a cell
+     * with a value past the filter's reach. Finding fewer worksheets than the
+     * load produced means a sheet went unread here, and that counts as a value.
+     */
+    private static function inXlsx(string $path, IReader $reader, BoundedReadFilter $filter, int $loadedSheets): bool
+    {
+        $zip = new \ZipArchive;
+        if ($zip->open($path, \ZipArchive::RDONLY) !== true) {
+            return true;
+        }
+
+        try {
+            $scanner = XmlScanner::getInstance($reader);
+            $worksheets = 0;
+            for ($index = 0; $index < $zip->numFiles; $index++) {
+                $contents = $zip->getFromIndex($index);
+                if (! is_string($contents) || $contents === '') {
+                    continue;
+                }
+                $worksheet = self::xlsxWorksheet($scanner, $contents);
+                if ($worksheet === null) {
+                    continue;
+                }
+                $worksheets++;
+                if (self::xlsxWorksheetHasValuePast($worksheet, $filter)) {
+                    return true;
+                }
+            }
+
+            return $worksheets < $loadedSheets;
+        } finally {
+            $zip->close();
+        }
+    }
+
+    /**
+     * One package part read as the reader reads a worksheet — its security
+     * scanner, which also normalizes the encoding, then SimpleXML in the
+     * SpreadsheetML namespace — or null when it is none.
+     */
+    private static function xlsxWorksheet(XmlScanner $scanner, string $contents): ?\SimpleXMLElement
+    {
+        try {
+            $scanned = $scanner->scan($contents);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        foreach ([Namespaces::MAIN, Namespaces::PURL_MAIN] as $namespace) {
+            $document = @simplexml_load_string($scanned, \SimpleXMLElement::class, 0, $namespace);
+            if ($document instanceof \SimpleXMLElement && isset($document->sheetData)) {
+                return $document;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * A cell counts once it has a value, an inline string or a formula. Its
+     * position is taken as the reader takes it: its own reference, or its
+     * place in the row and the row's place in the sheet when it has none.
+     */
+    private static function xlsxWorksheetHasValuePast(\SimpleXMLElement $worksheet, BoundedReadFilter $filter): bool
+    {
+        $rowNumber = 1;
+        foreach ($worksheet->sheetData->row as $row) {
+            $columnNumber = 1;
+            foreach ($row->c as $cell) {
+                $reference = (string) $cell->attributes()['r'];
+                if (preg_match('/^\$?([A-Z]+)\$?(\d+)$/i', $reference, $match) === 1) {
+                    $column = self::columnNumber($match[1]);
+                    $cellRow = (int) $match[2];
+                } else {
+                    $column = $columnNumber;
+                    $cellRow = $rowNumber;
+                }
+                if ((isset($cell->v) || isset($cell->is) || isset($cell->f))
+                    && ($cellRow > $filter->maxRow() || $column > $filter->maxColumns())) {
+                    return true;
+                }
+                $columnNumber++;
+            }
+            $rowNumber++;
+        }
+
+        return false;
+    }
+
+    /**
+     * `content.xml` streamed one node at a time, so the walk ends when the
+     * file does — `Ods::listWorksheetInfo()` never returns from a sheet whose
+     * last row is an empty self-closing repeated row, which ordinary exports
+     * end with.
+     *
+     * Counted the way the reader counts: a row or cell repeated N times
+     * advances N, so a cell with content in a repeated span reaches the
+     * span's end. Only a cell with content counts, so the empty span a sheet
+     * is padded out with does not. A table inside a cell would restart the
+     * count, so one is taken as a value rather than walked.
+     */
+    private static function inOds(string $path, BoundedReadFilter $filter): bool
+    {
+        $xml = \XMLReader::open('zip://'.$path.'#content.xml', null, LIBXML_NONET | LIBXML_COMPACT);
+        if (! $xml instanceof \XMLReader) {
+            return true;
+        }
+
+        try {
+            $row = 0;
+            $column = 0;
+            $sheetDepth = null;
+            while ($xml->read()) {
+                if ($xml->nodeType !== \XMLReader::ELEMENT) {
+                    continue;
+                }
+                switch ($xml->name) {
+                    case 'table:table':
+                        $sheetDepth ??= $xml->depth;
+                        if ($xml->depth !== $sheetDepth) {
+                            return true;
+                        }
+                        $row = 0;
+                        break;
+                    case 'table:table-row':
+                        $row += max(1, (int) $xml->getAttribute('table:number-rows-repeated'));
+                        $column = 0;
+                        break;
+                    case 'table:table-cell':
+                    case 'table:covered-table-cell':
+                        $column += max(1, (int) $xml->getAttribute('table:number-columns-repeated'));
+                        if (! $xml->isEmptyElement && ($row > $filter->maxRow() || $column > $filter->maxColumns())) {
+                            return true;
+                        }
+                        break;
+                }
+            }
+
+            return false;
+        } finally {
+            $xml->close();
+        }
+    }
+
+    /** A column's letters (A, Z, AA, XFD) as its 1-based number. */
+    private static function columnNumber(string $letters): int
+    {
+        $number = 0;
+        foreach (str_split(strtoupper($letters)) as $letter) {
+            $number = $number * 26 + (ord($letter) - 64);
+        }
+
+        return $number;
+    }
+}

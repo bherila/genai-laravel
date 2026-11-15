@@ -80,6 +80,26 @@ final readonly class IsolatedConverter
         return $this->run('spreadsheet', $base64, $mimeType);
     }
 
+    /**
+     * {@see spreadsheetToText()} with whether the extract is the whole
+     * workbook reported as data, exactly as
+     * {@see SpreadsheetToText::convertWithReport()} reports it in-process.
+     *
+     * @throws GenAiFatalException|GenAiFileTooLargeException
+     */
+    public function spreadsheetConversion(string $base64, string $mimeType): SpreadsheetConversion
+    {
+        $output = $this->run('spreadsheet-report', $base64, $mimeType);
+
+        try {
+            $decoded = json_decode($output, true, 4, JSON_THROW_ON_ERROR);
+
+            return SpreadsheetConversion::fromArray(is_array($decoded) ? $decoded : []);
+        } catch (\JsonException|\InvalidArgumentException|\ValueError $e) {
+            throw new GenAiFatalException('IsolatedConverter: the conversion did not report a readable result.', 0, $e);
+        }
+    }
+
     /** @throws GenAiFatalException|GenAiFileTooLargeException */
     public function wordDocumentToPdf(string $base64, string $mimeType): string
     {

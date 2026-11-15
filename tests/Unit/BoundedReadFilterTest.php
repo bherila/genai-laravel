@@ -77,4 +77,24 @@ class BoundedReadFilterTest extends TestCase
         $this->assertTrue($filter->readCell('A', 51));
         $this->assertFalse($filter->readCell('A', 52));
     }
+
+    /**
+     * A refused cell never reaches the renderer, so the filter is the only
+     * thing that knows a cut happened at load.
+     */
+    public function test_the_filter_remembers_whether_it_refused_anything(): void
+    {
+        $filter = new BoundedReadFilter(maxRow: 10, maxColumns: 3);
+
+        $filter->readCell('A', 1);
+        $filter->readCell('C', 10);
+        $this->assertFalse($filter->refusedAny());
+
+        $filter->readCell('A', 11);
+        $this->assertTrue($filter->refusedAny());
+
+        $wide = new BoundedReadFilter(maxRow: 10, maxColumns: 3);
+        $wide->readCell('D', 1);
+        $this->assertTrue($wide->refusedAny());
+    }
 }

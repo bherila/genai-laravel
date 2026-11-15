@@ -7,6 +7,7 @@ use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\FileConversion\ConversionLimits;
 use Bherila\GenAiLaravel\FileConversion\IsolatedConverter;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
+use Bherila\GenAiLaravel\FileConversion\SpreadsheetTruncation;
 use Orchestra\Testbench\TestCase;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx as XlsxWriter;
@@ -45,6 +46,28 @@ final class IsolatedConverterTest extends TestCase
             SpreadsheetToText::convert($xlsx, self::XLSX_MIME),
             $isolated,
         );
+    }
+
+    /** The report crosses back from the child exactly as it is made in-process. */
+    public function test_an_isolated_conversion_reports_a_value_lost_at_load(): void
+    {
+        $spreadsheet = new Spreadsheet;
+        $spreadsheet->getActiveSheet()->setCellValue('A1', 'Client');
+        $spreadsheet->getActiveSheet()->setCellValue('B100', '123-45-6789');
+        $path = tempnam(sys_get_temp_dir(), 'test_isolated_sparse_');
+        (new XlsxWriter($spreadsheet))->save($path);
+        $sparse = base64_encode((string) file_get_contents($path));
+        @unlink($path);
+        $limits = new ConversionLimits(maxRowsPerSheet: 10);
+
+        $isolated = (new IsolatedConverter(limits: $limits))->spreadsheetConversion($sparse, self::XLSX_MIME);
+
+        $this->assertSame(SpreadsheetTruncation::RowLimit, $isolated->truncation);
+        $this->assertEquals(SpreadsheetToText::convertWithReport($sparse, self::XLSX_MIME, $limits), $isolated);
+
+        $whole = (new IsolatedConverter)->spreadsheetConversion($this->workbook(), self::XLSX_MIME);
+        $this->assertTrue($whole->isComplete());
+        $this->assertStringContainsString("INV-001\t1200.5", $whole->text);
     }
 
     /**
