@@ -8,6 +8,7 @@ use Bherila\GenAiLaravel\FileConversion\SpreadsheetConversion;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetToText;
 use Bherila\GenAiLaravel\FileConversion\SpreadsheetTruncation;
 use Bherila\GenAiLaravel\FileConversion\UnreadSpreadsheetValues;
+use Bherila\GenAiLaravel\FileConversion\XlsxPartRecorder;
 use Orchestra\Testbench\TestCase;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
@@ -221,8 +222,10 @@ final class SpreadsheetConversionReportTest extends TestCase
         foreach (['Xlsx', 'Ods'] as $format) {
             $path = tempnam(sys_get_temp_dir(), 'test_deadline_');
             file_put_contents($path, base64_decode($this->workbook($format, $formattedPastTheCeiling)));
-            $reader = IOFactory::createReader($format);
+            $reader = $format === 'Xlsx' ? new XlsxPartRecorder : IOFactory::createReader($format);
             $filter = BoundedReadFilter::for($this->limits());
+            $reader->setReadFilter($filter);
+            $reader->load($path)->disconnectWorksheets();
 
             try {
                 // With time left the reading finds nothing lost; with none it
@@ -236,6 +239,86 @@ final class SpreadsheetConversionReportTest extends TestCase
             } finally {
                 @unlink($path);
             }
+        }
+    }
+
+    /**
+     * The second reading of an Excel package inflates only the parts the load
+     * inflated. An entry nothing in the workbook points at — here 8 MB of
+     * noise that passes every archive bound — used to be inflated whole just
+     * to learn it was not a worksheet.
+     */
+    public function test_an_entry_the_workbook_never_points_at_is_not_inflated(): void
+    {
+        $noise = random_bytes(8 * 1024 * 1024);
+        $formatted = $this->xlsxPackage(fn (Spreadsheet $spreadsheet) => $spreadsheet->getActiveSheet()->getStyle('B100')->getFont()->setBold(true), ['xl/media/unused.bin' => $noise]);
+
+        [$reader, $filter] = $this->loadedXlsx($formatted);
+        memory_reset_peak_usage();
+        $before = memory_get_usage();
+
+        $truncation = UnreadSpreadsheetValues::find($formatted, 'Xlsx', $reader, $filter, 1, microtime(true) + 60);
+
+        $this->assertLessThan(strlen($noise) / 2, memory_get_peak_usage() - $before);
+        $this->assertNull($truncation);
+
+        // The worksheet is still read: the same package with a value where
+        // the formatting was is reported as cut.
+        $valued = $this->xlsxPackage(fn (Spreadsheet $spreadsheet) => $spreadsheet->getActiveSheet()->setCellValue('B100', '123-45-6789'), ['xl/media/unused.bin' => $noise]);
+        [$reader, $filter] = $this->loadedXlsx($valued);
+        $this->assertSame(SpreadsheetTruncation::RowLimit, UnreadSpreadsheetValues::find($valued, 'Xlsx', $reader, $filter, 1, microtime(true) + 60));
+
+        @unlink($formatted);
+        @unlink($valued);
+    }
+
+    /**
+     * Without a record of what the load read, the second reading cannot tell
+     * which parts are the workbook's, so it reports a cut rather than walk
+     * the archive or pass the workbook.
+     */
+    public function test_an_excel_reader_with_no_record_reports_a_cut(): void
+    {
+        $formatted = $this->xlsxPackage(fn (Spreadsheet $spreadsheet) => $spreadsheet->getActiveSheet()->getStyle('B100')->getFont()->setBold(true));
+
+        try {
+            $this->assertSame(
+                SpreadsheetTruncation::RowLimit,
+                UnreadSpreadsheetValues::find($formatted, 'Xlsx', IOFactory::createReader('Xlsx'), BoundedReadFilter::for($this->limits()), 1, microtime(true) + 60),
+            );
+        } finally {
+            @unlink($formatted);
+        }
+    }
+
+    /**
+     * A worksheet is found the way the reader found it, not by re-deriving
+     * its target: a sheet moved to another folder behind a `..` target is
+     * still the part the second reading reads. Were it missed, the sheet
+     * count would come up short and a formatting-only workbook would be
+     * reported as cut.
+     */
+    public function test_a_worksheet_behind_a_relative_target_is_read_where_the_reader_found_it(): void
+    {
+        $move = function (\ZipArchive $zip): void {
+            $sheet = (string) $zip->getFromName('xl/worksheets/sheet1.xml');
+            $zip->deleteName('xl/worksheets/sheet1.xml');
+            $zip->addFromString('data/Sheet One.xml', $sheet);
+            $rels = (string) $zip->getFromName('xl/_rels/workbook.xml.rels');
+            $zip->addFromString('xl/_rels/workbook.xml.rels', str_replace('Target="worksheets/sheet1.xml"', 'Target="../data/Sheet One.xml"', $rels, $count));
+            $this->assertSame(1, $count);
+        };
+
+        $formatted = $this->xlsxPackage(fn (Spreadsheet $spreadsheet) => $spreadsheet->getActiveSheet()->getStyle('B100')->getFont()->setBold(true), rewrite: $move);
+        $valued = $this->xlsxPackage(fn (Spreadsheet $spreadsheet) => $spreadsheet->getActiveSheet()->setCellValue('B100', '123-45-6789'), rewrite: $move);
+
+        try {
+            $this->assertStringContainsString('Client', SpreadsheetToText::convert(base64_encode((string) file_get_contents($formatted)), self::MIMES['Xlsx'], $this->limits()));
+            $this->assertNull(SpreadsheetToText::convertWithReport(base64_encode((string) file_get_contents($formatted)), self::MIMES['Xlsx'], $this->limits())->truncation);
+            $this->assertSame(SpreadsheetTruncation::RowLimit, SpreadsheetToText::convertWithReport(base64_encode((string) file_get_contents($valued)), self::MIMES['Xlsx'], $this->limits())->truncation);
+        } finally {
+            @unlink($formatted);
+            @unlink($valued);
         }
     }
 
@@ -277,6 +360,51 @@ final class SpreadsheetConversionReportTest extends TestCase
         $this->expectException(\ValueError::class);
 
         SpreadsheetConversion::fromArray(['text' => "a\n", 'truncation' => 'somewhere']);
+    }
+
+    /**
+     * An Excel package on disk with `Client` in A1, whatever `$fill` adds,
+     * extra entries no part points at, and an optional rewrite of the
+     * package before it is closed.
+     *
+     * @param  \Closure(Spreadsheet): mixed  $fill
+     * @param  array<string, string>  $extraEntries
+     * @param  (\Closure(\ZipArchive): void)|null  $rewrite
+     */
+    private function xlsxPackage(\Closure $fill, array $extraEntries = [], ?\Closure $rewrite = null): string
+    {
+        $path = (string) tempnam(sys_get_temp_dir(), 'test_xlsx_');
+        file_put_contents($path, base64_decode($this->workbook('Xlsx', function (Spreadsheet $spreadsheet) use ($fill): void {
+            $spreadsheet->getActiveSheet()->setCellValue('A1', 'Client');
+            $fill($spreadsheet);
+        })));
+
+        $zip = new \ZipArchive;
+        $this->assertTrue($zip->open($path));
+        foreach ($extraEntries as $name => $contents) {
+            $zip->addFromString($name, $contents);
+        }
+        if ($rewrite !== null) {
+            $rewrite($zip);
+        }
+        $zip->close();
+
+        return $path;
+    }
+
+    /**
+     * An Excel package loaded the way the converter loads it.
+     *
+     * @return array{0: XlsxPartRecorder, 1: BoundedReadFilter}
+     */
+    private function loadedXlsx(string $path): array
+    {
+        $reader = new XlsxPartRecorder;
+        $filter = BoundedReadFilter::for($this->limits());
+        $reader->setReadFilter($filter);
+        $reader->load($path)->disconnectWorksheets();
+
+        return [$reader, $filter];
     }
 
     /** @param  \Closure(Spreadsheet): void  $fill */
