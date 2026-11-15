@@ -186,6 +186,27 @@ final class SpreadsheetConversionReportTest extends TestCase
     }
 
     /**
+     * The reader finds sheets by namespace and rows and cells by local name,
+     * so a file that binds the table namespace to another prefix as well, and
+     * writes its rows with that one, is read by the reader — and has to be
+     * read the same way here, or its lost value passes as complete.
+     */
+    public function test_ods_rows_written_under_another_prefix_are_counted(): void
+    {
+        $workbook = $this->odsWithRows(
+            '<t:table-row><t:table-cell office:value-type="string"><text:p>Client</text:p></t:table-cell></t:table-row>'
+            .'<t:table-row t:number-rows-repeated="500"><t:table-cell/></t:table-row>'
+            .'<t:table-row><t:table-cell o:value-type="string"><text:p>123-45-6789</text:p></t:table-cell></t:table-row>',
+            rootAttributes: ' xmlns:t="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:o="urn:oasis:names:tc:opendocument:xmlns:office:1.0"',
+        );
+
+        $conversion = SpreadsheetToText::convertWithReport($workbook, self::ODS_MIME, $this->limits());
+
+        $this->assertStringContainsString('Client', $conversion->text);
+        $this->assertSame(SpreadsheetTruncation::RowLimit, $conversion->truncation);
+    }
+
+    /**
      * The second reading runs on the conversion's clock. Once the deadline
      * has passed it stops and reports the time limit rather than running on,
      * or answering as though it had read the whole file.
@@ -281,7 +302,7 @@ final class SpreadsheetConversionReportTest extends TestCase
      * Starts from a file the writer produced, so everything around the sheet
      * is what the reader expects, and replaces the sheet's rows.
      */
-    private function odsWithRows(string $rows): string
+    private function odsWithRows(string $rows, string $rootAttributes = ''): string
     {
         $base = base64_decode($this->workbook('Ods', fn (Spreadsheet $spreadsheet) => null));
         $path = tempnam(sys_get_temp_dir(), 'test_ods_');
@@ -293,6 +314,8 @@ final class SpreadsheetConversionReportTest extends TestCase
             $content = (string) $zip->getFromName('content.xml');
             $replaced = preg_replace('#(<table:table [^>]*>)(.*?)(</table:table>)#s', '$1<table:table-column/>'.$rows.'$3', $content, 1, $count);
             $this->assertSame(1, $count);
+            $replaced = preg_replace('#<office:document-content #', '<office:document-content'.$rootAttributes.' ', (string) $replaced, 1, $rooted);
+            $this->assertSame(1, $rooted);
             $zip->addFromString('content.xml', (string) $replaced);
             $zip->close();
 

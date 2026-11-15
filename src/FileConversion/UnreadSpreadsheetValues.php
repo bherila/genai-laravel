@@ -30,6 +30,9 @@ final class UnreadSpreadsheetValues
     /** How many nodes or rows a walk takes between looks at the clock. */
     private const CLOCK_INTERVAL = 1_024;
 
+    /** Cell attributes the ODS reader reads a value or formula from. */
+    private const ODS_VALUE_ATTRIBUTES = ['formula', 'value-type', 'value', 'date-value', 'time-value', 'boolean-value', 'string-value'];
+
     private int $steps = 0;
 
     private function __construct(
@@ -180,13 +183,19 @@ final class UnreadSpreadsheetValues
      * last row is an empty self-closing repeated row, which ordinary exports
      * end with.
      *
-     * Counted the way the reader counts: a row or cell repeated N times
-     * advances N, so a cell with content in a repeated span reaches the
-     * span's end. A cell counts when it has content or carries a formula or a
-     * value type, which the reader can read from its attributes alone, so a
-     * self-closing `<table:table-cell table:formula="…"/>` is a value; the
-     * empty span a sheet is padded out with is not. A table inside a cell would restart the
-     * count, so one is taken as a value rather than walked.
+     * Names are resolved the way the reader resolves them, not by the prefix
+     * a file happens to use: a sheet is an element named `table` in the
+     * namespace the root binds to the `table` prefix, its rows and cells are
+     * matched on their local names alone, and the repeat counts are that
+     * namespace's attributes. A row or cell repeated N times advances N, so a
+     * cell with content in a repeated span reaches the span's end.
+     *
+     * A cell counts when it has content or carries any attribute a value can
+     * be read from — a formula, a value type, or one of the value attributes —
+     * in whatever namespace, so a self-closing
+     * `<table:table-cell table:formula="…"/>` is a value; the empty span a
+     * sheet is padded out with is not. A table inside a cell would restart
+     * the count, so one is taken as a value rather than walked.
      */
     private function inOds(string $path): bool
     {
@@ -196,6 +205,7 @@ final class UnreadSpreadsheetValues
         }
 
         try {
+            $tableNs = null;
             $row = 0;
             $column = 0;
             $sheetDepth = null;
@@ -204,21 +214,28 @@ final class UnreadSpreadsheetValues
                 if ($xml->nodeType !== \XMLReader::ELEMENT) {
                     continue;
                 }
-                switch ($xml->name) {
-                    case 'table:table':
+                // The reader takes the namespace from the document element
+                // (DOMDocument::lookupNamespaceURI('table')), so this does too.
+                $tableNs ??= (string) $xml->lookupNamespace('table');
+
+                switch ($xml->localName) {
+                    case 'table':
+                        if ($xml->namespaceURI !== $tableNs) {
+                            break;
+                        }
                         $sheetDepth ??= $xml->depth;
                         if ($xml->depth !== $sheetDepth) {
                             return true;
                         }
                         $row = 0;
                         break;
-                    case 'table:table-row':
-                        $row += max(1, (int) $xml->getAttribute('table:number-rows-repeated'));
+                    case 'table-row':
+                        $row += max(1, self::odsRepeats($xml, 'number-rows-repeated', $tableNs));
                         $column = 0;
                         break;
-                    case 'table:table-cell':
-                    case 'table:covered-table-cell':
-                        $column += max(1, (int) $xml->getAttribute('table:number-columns-repeated'));
+                    case 'table-cell':
+                    case 'covered-table-cell':
+                        $column += max(1, self::odsRepeats($xml, 'number-columns-repeated', $tableNs));
                         if (($row > $this->filter->maxRow() || $column > $this->filter->maxColumns()) && self::odsCellHoldsValue($xml)) {
                             return true;
                         }
@@ -232,15 +249,36 @@ final class UnreadSpreadsheetValues
         }
     }
 
+    /** A repeat count, read as the reader reads it: in the table namespace. */
+    private static function odsRepeats(\XMLReader $xml, string $attribute, string $tableNs): int
+    {
+        return (int) ($tableNs === '' ? $xml->getAttribute($attribute) : $xml->getAttributeNs($attribute, $tableNs));
+    }
+
     /**
-     * Whether the cell the reader is on has anything the ODS reader could
-     * turn into a value: child content, a formula or a value type.
+     * Whether the cell the walk is on has anything the ODS reader could turn
+     * into a value: child content, or an attribute a value can be read from,
+     * in any namespace. Broader than the reader on purpose — a cell taken for
+     * a value here is reported as cut, never passed.
      */
     private static function odsCellHoldsValue(\XMLReader $xml): bool
     {
-        return ! $xml->isEmptyElement
-            || $xml->getAttribute('table:formula') !== null
-            || $xml->getAttribute('office:value-type') !== null;
+        if (! $xml->isEmptyElement) {
+            return true;
+        }
+
+        $holdsValue = false;
+        if ($xml->moveToFirstAttribute()) {
+            do {
+                if (in_array($xml->localName, self::ODS_VALUE_ATTRIBUTES, true)) {
+                    $holdsValue = true;
+                    break;
+                }
+            } while ($xml->moveToNextAttribute());
+            $xml->moveToElement();
+        }
+
+        return $holdsValue;
     }
 
     /** A column's letters (A, Z, AA, XFD) as its 1-based number. */
