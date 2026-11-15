@@ -33,7 +33,7 @@ require $autoload;
 
 // argv: converter, input path, mime type, limits as JSON
 if ($argc !== 5) {
-    fwrite(STDERR, "usage: genai-convert <spreadsheet|word> <path> <mime> <limits-json>\n");
+    fwrite(STDERR, "usage: genai-convert <spreadsheet|spreadsheet-report|word> <path> <mime> <limits-json>\n");
     exit(2);
 }
 [, $converter, $path, $mime, $limitsJson] = $argv;
@@ -63,6 +63,10 @@ $limits = new ConversionLimits(
 try {
     $result = match ($converter) {
         'spreadsheet' => SpreadsheetToText::convert(base64_encode($contents), $mime, $limits),
+        'spreadsheet-report' => json_encode(
+            SpreadsheetToText::convertWithReport(base64_encode($contents), $mime, $limits)->toArray(),
+            JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE,
+        ),
         'word' => WordDocumentToPdf::convert(base64_encode($contents), $mime, $limits),
         default => throw new InvalidArgumentException("Unknown converter [{$converter}]."),
     };

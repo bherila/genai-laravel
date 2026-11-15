@@ -54,9 +54,30 @@ final class SpreadsheetToText
      * Decode base64 spreadsheet bytes and return a tab-separated text rendering.
      *
      * Multi-sheet workbooks are concatenated with a `=== Sheet: <name> ===` header
-     * before each sheet so the model can tell them apart.
+     * before each sheet so the model can tell them apart. A workbook past a
+     * ceiling ends with a `=== Truncated: … ===` line; use
+     * {@see convertWithReport()} to learn that without reading the text.
      */
     public static function convert(string $base64, string $mimeType, ?ConversionLimits $limits = null): string
+    {
+        return self::convertWithReport($base64, $mimeType, $limits)->text;
+    }
+
+    /**
+     * The same rendering as {@see convert()}, with whether it holds the whole
+     * workbook reported as data.
+     *
+     * `$truncation` is null only when no ceiling cut the extract short. That
+     * includes the cut a reader makes while loading: a cell past the row
+     * ceiling is never built, so a sparse sheet — an empty span of rows, then
+     * one value past the ceiling — renders a few rows and reaches no limit
+     * while the value is lost. When the read filter refused anything, the
+     * file is read a second time for values alone
+     * ({@see UnreadSpreadsheetValues}), and a value found there, or any doubt,
+     * is reported as the row limit. That reading runs on the conversion's
+     * clock, and is reported as the time limit if the clock runs out first.
+     */
+    public static function convertWithReport(string $base64, string $mimeType, ?ConversionLimits $limits = null): SpreadsheetConversion
     {
         $limits ??= ConversionLimits::fromConfig();
         // The clock starts here, not after load(): parsing the workbook is the
@@ -114,7 +135,8 @@ final class SpreadsheetToText
             }
 
             try {
-                $reader = IOFactory::createReaderForFile($tmp);
+                $format = IOFactory::identify($tmp);
+                $reader = IOFactory::createReader($format);
                 // Number formats are what make a spreadsheet readable: they turn a
                 // serial into a date, a fraction into a percentage and a bare number
                 // into a currency amount. They live in the workbook's style records,
@@ -139,26 +161,46 @@ final class SpreadsheetToText
                 // Applied at load() so the ceilings bound what is read. Without
                 // it they bound only what is rendered, and a sheet with one
                 // value in its far corner is fully built before anything counts.
-                $reader->setReadFilter(BoundedReadFilter::for($limits));
+                $filter = BoundedReadFilter::for($limits);
+                $reader->setReadFilter($filter);
                 $spreadsheet = $reader->load($tmp);
             } catch (\Throwable $e) {
                 throw new GenAiFatalException('SpreadsheetToText: failed to read spreadsheet — '.$e->getMessage(), 0, $e);
             }
 
-            return self::renderSpreadsheet($spreadsheet, $limits, $deadline);
+            [$parts, $truncation] = self::renderSpreadsheet($spreadsheet, $limits, $deadline);
+            $sheetCount = $spreadsheet->getSheetCount();
+            // Released before the second reading, which then never shares
+            // the process with the loaded workbook.
+            $spreadsheet->disconnectWorksheets();
+            unset($spreadsheet);
+
+            if ($truncation === null && $filter->refusedAny()) {
+                $truncation = microtime(true) > $deadline
+                    ? SpreadsheetTruncation::TimeLimit
+                    : UnreadSpreadsheetValues::find($tmp, $format, $reader, $filter, $sheetCount, $deadline);
+            }
+
+            if ($truncation !== null) {
+                $parts[] = '=== Truncated: extraction stopped at the '.$truncation->describe($limits).' ===';
+            }
+
+            return new SpreadsheetConversion(rtrim(implode("\n", $parts), "\n")."\n", $truncation);
         } finally {
             @unlink($tmp);
         }
     }
 
     /**
-     * Renders under the supplied ceilings, appending a truncation marker rather
-     * than throwing: a partial extract is still useful to the model, and a
-     * silent one would be worse than either.
+     * Renders under the supplied ceilings, stopping at the first one reached
+     * rather than throwing: a partial extract is still useful to the model,
+     * and a silent one would be worse than either. The caller writes the
+     * marker, so a cut found after rendering is reported the same way.
      *
      * @param  float  $deadline  microtime(true) value past which extraction stops.
+     * @return array{0: list<string>, 1: SpreadsheetTruncation|null}
      */
-    private static function renderSpreadsheet(Spreadsheet $spreadsheet, ConversionLimits $limits, float $deadline): string
+    private static function renderSpreadsheet(Spreadsheet $spreadsheet, ConversionLimits $limits, float $deadline): array
     {
         $parts = [];
         $cells = 0;
@@ -179,18 +221,18 @@ final class SpreadsheetToText
             // whole rectangular grid the way toArray() does.
             foreach ($sheet->getRowIterator() as $row) {
                 if (++$rows > $limits->maxRowsPerSheet) {
-                    $truncated = sprintf('row limit of %d per sheet', $limits->maxRowsPerSheet);
+                    $truncated = SpreadsheetTruncation::RowLimit;
                     break;
                 }
                 if (microtime(true) > $deadline) {
-                    $truncated = sprintf('time limit of %.0fs', $limits->maxSeconds);
+                    $truncated = SpreadsheetTruncation::TimeLimit;
                     break;
                 }
 
                 $values = [];
                 foreach ($row->getCellIterator() as $cell) {
                     if (++$cells > $limits->maxCells) {
-                        $truncated = sprintf('cell limit of %d', $limits->maxCells);
+                        $truncated = SpreadsheetTruncation::CellLimit;
                         break;
                     }
                     $values[] = $cell->getFormattedValue();
@@ -201,7 +243,7 @@ final class SpreadsheetToText
                 $parts[] = $line;
 
                 if ($bytes > $limits->maxOutputBytes) {
-                    $truncated = sprintf('output limit of %s', FileLimits::humanBytes($limits->maxOutputBytes));
+                    $truncated = SpreadsheetTruncation::OutputLimit;
                 }
                 if ($truncated !== null) {
                     break;
@@ -211,10 +253,6 @@ final class SpreadsheetToText
             $parts[] = '';
         }
 
-        if ($truncated !== null) {
-            $parts[] = '=== Truncated: extraction stopped at the '.$truncated.' ===';
-        }
-
-        return rtrim(implode("\n", $parts), "\n")."\n";
+        return [$parts, $truncated];
     }
 }

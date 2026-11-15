@@ -658,6 +658,27 @@ $client = new AnthropicClient(apiKey: $key, conversionLimits: $limits);
 
 Spreadsheet extraction truncates rather than throws when it hits a row, cell,
 output, or time ceiling, and marks the cut with a `=== Truncated: … ===` line.
+Code that must see the whole workbook — a scan for personal data, say — should
+not parse that line: `convertWithReport()` returns the same text with the cut
+as data.
+
+```php
+$conversion = SpreadsheetToText::convertWithReport($base64, $mime, $limits);
+
+$conversion->text;          // what convert() returns
+$conversion->isComplete();  // false when any ceiling cut the extract short
+$conversion->truncation;    // SpreadsheetTruncation::RowLimit, CellLimit, OutputLimit, TimeLimit, or null
+```
+
+That includes cells the reader skipped while loading. The row ceiling is
+applied at load, so a sparse sheet — a few rows, an empty span, then one value
+past the ceiling — used to render without reaching any limit while the far
+value was never read. When the load skipped anything, the file is read again
+for values alone; a value found past the ceiling, or any doubt about one, is
+reported as the row limit. Excel and OpenDocument formatting past the ceiling
+does not count, but a legacy `.xls` is not read again, so formatting past the
+ceiling there is reported as a cut. `IsolatedConverter::spreadsheetConversion()`
+returns the same report from the child process.
 Word conversion throws when it outruns its budget, since a half-rendered PDF is
 no use to anyone.
 
