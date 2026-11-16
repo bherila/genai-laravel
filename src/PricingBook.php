@@ -21,20 +21,30 @@ final class PricingBook
     /**
      * Build a PricingBook from a config-style array. Each entry under
      * `genai.pricing.<provider>.<modelId>` is a row with keys
-     * `input`, `output`, optional `cache_read`, optional `cache_creation`.
+     * `input`, `output`, optional `cache_read`, optional `cache_creation`, and an
+     * optional `long_prompt` row (`above_tokens` plus the same four prices) for a
+     * model whose requests over a prompt size are billed at a higher rate.
      *
-     * @param  array<string, array<string, array{input: float|int, output: float|int, cache_read?: float|int|null, cache_creation?: float|int|null}>>  $config
+     * @param  array<string, array<string, array{input: float|int, output: float|int, cache_read?: float|int|null, cache_creation?: float|int|null, long_prompt?: array{above_tokens: int, input: float|int, output: float|int, cache_read?: float|int|null, cache_creation?: float|int|null}|null}>>  $config
      */
     public static function fromArray(array $config): self
     {
         $entries = [];
         foreach ($config as $provider => $models) {
             foreach ($models as $modelId => $row) {
+                $long = $row['long_prompt'] ?? null;
                 $entries[$provider][$modelId] = new ModelPrice(
                     inputPerMillion: (float) $row['input'],
                     outputPerMillion: (float) $row['output'],
                     cacheReadPerMillion: isset($row['cache_read']) ? (float) $row['cache_read'] : null,
                     cacheCreationPerMillion: isset($row['cache_creation']) ? (float) $row['cache_creation'] : null,
+                    longPromptThreshold: is_array($long) ? (int) $long['above_tokens'] : null,
+                    longPromptPrice: is_array($long) ? new ModelPrice(
+                        inputPerMillion: (float) $long['input'],
+                        outputPerMillion: (float) $long['output'],
+                        cacheReadPerMillion: isset($long['cache_read']) ? (float) $long['cache_read'] : null,
+                        cacheCreationPerMillion: isset($long['cache_creation']) ? (float) $long['cache_creation'] : null,
+                    ) : null,
                 );
             }
         }
@@ -47,7 +57,7 @@ final class PricingBook
      */
     public static function fromConfig(): self
     {
-        /** @var array<string, array<string, array{input: float|int, output: float|int, cache_read?: float|int|null, cache_creation?: float|int|null}>> $config */
+        /** @var array<string, array<string, array{input: float|int, output: float|int, cache_read?: float|int|null, cache_creation?: float|int|null, long_prompt?: array{above_tokens: int, input: float|int, output: float|int, cache_read?: float|int|null, cache_creation?: float|int|null}|null}>> $config */
         $config = (array) config('genai.pricing', []);
 
         return self::fromArray($config);
@@ -101,6 +111,10 @@ final class PricingBook
         if ($price === null) {
             return null;
         }
+
+        $price = $price->forPromptTokens(
+            $usage->inputTokens + $usage->cacheReadInputTokens + $usage->cacheCreationInputTokens,
+        );
 
         return $usage->estimatedCostUsd(
             inputPerMillion: $price->inputPerMillion,

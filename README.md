@@ -240,6 +240,15 @@ ToolChoice::none()          // model must not call any tool
 ToolChoice::tool('my_fn')   // model must call this specific tool
 ```
 
+Some Anthropic models refuse a forced choice: Claude Sonnet 5.5, Claude Opus 5.5
+and the Fable/Mythos 5.1+ models answer `any` and `tool` with a 400.
+`AnthropicClient` sends those requests as `auto`, adds a system-prompt line naming
+the tool to call, and asks once more in the same conversation when the model
+answers in plain text; the returned `usage` covers both turns. A model not yet
+known to refuse is learned from its first 400. A reply can therefore still arrive
+without a tool call, so check for one (`toolCallByName()` returning `null`)
+rather than assuming it. `rejectsForcedToolChoice()` says which path a client takes.
+
 ### File APIs (large files)
 
 Gemini and Anthropic both store uploaded files and let you reference them by ID

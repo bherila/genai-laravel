@@ -5,6 +5,7 @@ namespace Bherila\GenAiLaravel\Clients;
 use Bherila\GenAiLaravel\ContentBlock;
 use Bherila\GenAiLaravel\Contracts\GenAiClient;
 use Bherila\GenAiLaravel\Contracts\HeartbeatAwareClient;
+use Bherila\GenAiLaravel\Exceptions\GenAiException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFatalException;
 use Bherila\GenAiLaravel\Exceptions\GenAiFileTooLargeException;
 use Bherila\GenAiLaravel\Exceptions\GenAiUploadException;
@@ -52,6 +53,26 @@ class AnthropicClient implements GenAiClient, HeartbeatAwareClient
      * https://platform.claude.com/docs/en/build-with-claude/files
      */
     private const FILES_API_BETA = 'files-api-2025-04-14';
+
+    /**
+     * Model id prefixes that answer `tool_choice` `any` / `tool` with a 400.
+     * See rejectsForcedToolChoice().
+     */
+    private const MODELS_REJECTING_FORCED_TOOL_CHOICE = [
+        'claude-sonnet-5-5',
+        'claude-opus-5-5',
+        'claude-fable-5-1',
+        'claude-fable-5-2',
+        'claude-mythos-5-1',
+        'claude-mythos-5-2',
+    ];
+
+    /**
+     * Models outside the list above that rejected a forced tool choice in this process.
+     *
+     * @var array<string, true>
+     */
+    private static array $modelsRejectingForcedToolChoice = [];
 
     /**
      * MIME types the Anthropic Messages API accepts as a `document` content block.
@@ -390,10 +411,119 @@ class AnthropicClient implements GenAiClient, HeartbeatAwareClient
      */
     public function converse(string $system, array $messages, ?ToolConfig $toolConfig = null): array
     {
+        $nativeMessages = $this->convertMessages($messages, $this->spreadsheetLimitsFor($system, $messages, $toolConfig));
+
+        if ($toolConfig === null || ! self::isForced($toolConfig->choice)) {
+            return $this->sendMessages($this->buildPayload($system, $nativeMessages, $toolConfig, false));
+        }
+
+        if (! $this->rejectsForcedToolChoice()) {
+            try {
+                return $this->sendMessages($this->buildPayload($system, $nativeMessages, $toolConfig, false));
+            } catch (GenAiException $e) {
+                if (! self::isForcedToolChoiceRejection($e)) {
+                    throw $e;
+                }
+                self::$modelsRejectingForcedToolChoice[$this->model] = true;
+            }
+        }
+
+        return $this->converseWithUnforcedToolChoice($system, $nativeMessages, $toolConfig);
+    }
+
+    /**
+     * Whether this client's model refuses `tool_choice` `any` and `tool`.
+     *
+     * Claude Sonnet 5.5, Claude Opus 5.5 and the Fable/Mythos 5.1+ models answer a
+     * forced tool choice with a 400 ("tool_choice: type "tool" and "any" are not
+     * supported for this model"). The known ones are listed by id prefix, so dated
+     * or suffixed ids match; a model released later is learned from its first 400
+     * and remembered for the life of the process.
+     */
+    public function rejectsForcedToolChoice(): bool
+    {
+        if (isset(self::$modelsRejectingForcedToolChoice[$this->model])) {
+            return true;
+        }
+
+        foreach (self::MODELS_REJECTING_FORCED_TOOL_CHOICE as $prefix) {
+            if (str_starts_with($this->model, $prefix)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Forget the models learned at runtime to reject a forced tool choice.
+     *
+     * @internal For tests.
+     */
+    public static function forgetLearnedToolChoiceRejections(): void
+    {
+        self::$modelsRejectingForcedToolChoice = [];
+    }
+
+    /**
+     * Serve a forced tool choice on a model that refuses one.
+     *
+     * The request goes out with `tool_choice: auto` and a system instruction naming
+     * the tool (or "one of the tools") the caller asked to force. A model that
+     * still ends its turn in plain text is asked once more, in the same
+     * conversation, to answer through the tool; the returned response is that
+     * second turn, with both turns' token usage summed into `usage` so cost
+     * accounting sees every token billed. A reply that still carries no tool call
+     * is returned as it is: the caller's missing-tool-call handling applies, as it
+     * would to any malformed answer.
+     *
+     * @param  list<array<string, mixed>>  $nativeMessages
+     * @return array<string, mixed>
+     */
+    private function converseWithUnforcedToolChoice(string $system, array $nativeMessages, ToolConfig $toolConfig): array
+    {
+        $choice = $toolConfig->choice;
+        $instruction = $choice->type === ToolChoice::TOOL
+            ? sprintf('Answer by calling the `%s` tool. Do not answer in plain text.', $choice->toolName)
+            : 'Answer by calling one of the provided tools. Do not answer in plain text.';
+        $steeredSystem = $system === '' ? $instruction : $system."\n\n".$instruction;
+
+        $payload = $this->buildPayload($steeredSystem, $nativeMessages, $toolConfig, true);
+        $first = $this->sendMessages($payload);
+
+        $content = $first['content'] ?? [];
+        if ($this->extractToolCalls($first) !== []
+            || ($first['stop_reason'] ?? null) !== 'end_turn'
+            || ! is_array($content)
+            || $content === []) {
+            return $first;
+        }
+
+        $reminder = $choice->type === ToolChoice::TOOL
+            ? sprintf('Call the `%s` tool now with your answer.', $choice->toolName)
+            : 'Call one of the provided tools now with your answer.';
+        $payload['messages'][] = ['role' => 'assistant', 'content' => $content];
+        $payload['messages'][] = ['role' => 'user', 'content' => [['type' => 'text', 'text' => $reminder]]];
+
+        $second = $this->sendMessages($payload);
+        $second['usage'] = self::sumUsage(
+            is_array($first['usage'] ?? null) ? $first['usage'] : [],
+            is_array($second['usage'] ?? null) ? $second['usage'] : [],
+        );
+
+        return $second;
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $nativeMessages
+     * @return array<string, mixed>
+     */
+    private function buildPayload(string $system, array $nativeMessages, ?ToolConfig $toolConfig, bool $unforceToolChoice): array
+    {
         $payload = [
             'model' => $this->model,
             'max_tokens' => $this->maxTokens,
-            'messages' => $this->convertMessages($messages, $this->spreadsheetLimitsFor($system, $messages, $toolConfig)),
+            'messages' => $nativeMessages,
         ];
 
         if ($system !== '') {
@@ -403,9 +533,49 @@ class AnthropicClient implements GenAiClient, HeartbeatAwareClient
         if ($toolConfig !== null) {
             $native = $this->toolConfigToAnthropic($toolConfig);
             $payload['tools'] = $native['tools'];
-            $payload['tool_choice'] = $native['tool_choice'];
+            $payload['tool_choice'] = $unforceToolChoice ? ['type' => 'auto'] : $native['tool_choice'];
         }
 
+        return $payload;
+    }
+
+    private static function isForced(ToolChoice $choice): bool
+    {
+        return $choice->type === ToolChoice::ANY || $choice->type === ToolChoice::TOOL;
+    }
+
+    private static function isForcedToolChoiceRejection(GenAiException $e): bool
+    {
+        $message = $e->getMessage();
+
+        return str_contains($message, 'tool_choice') && str_contains($message, 'not supported for this model');
+    }
+
+    /**
+     * Add two `usage` objects field by field; non-numeric fields come from the later one.
+     *
+     * @param  array<string, mixed>  $first
+     * @param  array<string, mixed>  $second
+     * @return array<string, mixed>
+     */
+    private static function sumUsage(array $first, array $second): array
+    {
+        $sum = $second;
+        foreach ($first as $key => $value) {
+            if (is_int($value) && (is_int($second[$key] ?? null) || ! array_key_exists($key, $second))) {
+                $sum[$key] = $value + (int) ($second[$key] ?? 0);
+            }
+        }
+
+        return $sum;
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function sendMessages(array $payload): array
+    {
         FileLimits::assertRequestWithin($payload, self::maxRequestBytes(), 'Anthropic Messages API');
 
         // The beta flag rides along only when the payload actually references an
