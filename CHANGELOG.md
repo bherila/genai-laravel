@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.3 — 2026-11-16
+
+- `AnthropicClient` serves `ToolChoice::any()` and `ToolChoice::tool()` on models
+  that reject a forced tool choice (Claude Sonnet 5.5, Claude Opus 5.5, Fable and
+  Mythos 5.1+), which previously failed every such request with a 400. The
+  request goes out as `auto`, with a system-prompt line naming the tool. A
+  plain-text reply is asked once more in the same conversation, and both turns'
+  usage is summed into the response. Models not on the list are learned from
+  their first rejection. Models that accept forcing keep the forced choice and
+  an unchanged request.
+- New `AnthropicClient::rejectsForcedToolChoice()`.
+
 ## 0.3.2 — 2026-11-15
 
 - Add `SpreadsheetToText::convertWithReport()` and its `SpreadsheetConversion`
