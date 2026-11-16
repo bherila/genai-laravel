@@ -116,6 +116,35 @@ class PricingBookTest extends TestCase
         $this->assertSame(11.1, $book->estimateCost($usage, 'anthropic', 'claude-sonnet-4-6'));
     }
 
+    public function test_a_long_prompt_is_billed_at_the_long_prompt_price(): void
+    {
+        $book = PricingBook::fromArray([
+            'anthropic' => ['claude-haiku-5-5' => [
+                'input' => 0.10, 'output' => 0.50, 'cache_read' => 0.01, 'cache_creation' => 0.125,
+                'long_prompt' => ['above_tokens' => 100_000, 'input' => 0.50, 'output' => 2.50, 'cache_read' => 0.05, 'cache_creation' => 0.625],
+            ]],
+        ]);
+
+        // 100,000 prompt tokens exactly is the short price: 0.1*0.10 + 0.01*0.50.
+        $short = new Usage(inputTokens: 100_000, outputTokens: 10_000, totalTokens: 110_000);
+        $this->assertEqualsWithDelta(0.015, $book->estimateCost($short, 'anthropic', 'claude-haiku-5-5'), 1e-12);
+
+        // Cache reads count toward the prompt: 60k input + 50k cached = 110k, so
+        // every token pays the long price: 0.06*0.50 + 0.05*0.05 + 0.01*2.50.
+        $long = new Usage(inputTokens: 60_000, outputTokens: 10_000, totalTokens: 120_000, cacheReadInputTokens: 50_000);
+        $this->assertEqualsWithDelta(0.0575, $book->estimateCost($long, 'anthropic', 'claude-haiku-5-5'), 1e-12);
+    }
+
+    public function test_a_price_without_a_long_prompt_tier_ignores_prompt_size(): void
+    {
+        $book = PricingBook::fromArray([
+            'anthropic' => ['claude-sonnet-5-5' => ['input' => 2.0, 'output' => 10.0]],
+        ]);
+
+        $usage = new Usage(inputTokens: 900_000, outputTokens: 0, totalTokens: 900_000);
+        $this->assertEqualsWithDelta(1.8, $book->estimateCost($usage, 'anthropic', 'claude-sonnet-5-5'), 1e-12);
+    }
+
     public function test_estimate_cost_returns_null_when_unknown(): void
     {
         $book = PricingBook::fromArray([]);
